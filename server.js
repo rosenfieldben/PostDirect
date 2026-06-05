@@ -19,6 +19,7 @@ const SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
 // Request body size limits (bytes)
 const LOGIN_BODY_LIMIT = 16 * 1024;          // 16 KB — the login form is tiny
 const PROXY_BODY_LIMIT = 52 * 1024 * 1024;   // 52 MB — headroom over the 50 MB PDF cap + multipart overhead
+const PROXY_TIMEOUT_MS = 30 * 1000;          // 30 s — upstream Lob request timeout
 
 // Login rate limiting (per-IP, in-memory)
 const LOGIN_MAX_ATTEMPTS = 5;
@@ -151,6 +152,15 @@ function recordFailedLogin(ip) {
 }
 
 function clearLoginAttempts(ip) { loginAttempts.delete(ip); }
+
+// Prevent unbounded growth: periodically drop expired attempt records.
+// unref() so this timer never keeps the process alive on its own.
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, rec] of loginAttempts) {
+    if (now - rec.first > LOGIN_WINDOW_MS) loginAttempts.delete(ip);
+  }
+}, LOGIN_WINDOW_MS).unref();
  
 function sendJSON(res, status, obj) {
   const body = JSON.stringify(obj);
@@ -176,7 +186,7 @@ const MIME_TYPES = { '.html': 'text/html', '.css': 'text/css', '.js': 'applicati
  
 function serveStatic(res, filePath) {
   const full = path.join(STATIC_DIR, filePath);
-  if (!full.startsWith(STATIC_DIR)) { res.writeHead(403); res.end(); return; }
+  if (full !== STATIC_DIR && !full.startsWith(STATIC_DIR + path.sep)) { res.writeHead(403); res.end(); return; }
   fs.readFile(full, (err, data) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
     const ext = path.extname(full);
@@ -450,6 +460,7 @@ const server = http.createServer(async (req, res) => {
  
   // ── Logout ──
   if (pathname === '/logout') {
+    if (req.method !== 'POST') return redirect(res, '/'); // GET logout is a no-op (CSRF-safe)
     clearCookie(res, isSecure(req));
     return redirect(res, '/login');
   }
@@ -461,7 +472,7 @@ const server = http.createServer(async (req, res) => {
  
   // ── Lob API proxy ──
   if (pathname.startsWith('/api/lob/')) {
-    const lobPath = pathname.replace('/api/lob', '');
+    const lobPath = pathname.replace('/api/lob', '') + url.search;
     const bodyBuf = await readBody(req, res, PROXY_BODY_LIMIT);
     if (bodyBuf === null) return; // 413/400 already sent
  
@@ -484,7 +495,14 @@ const server = http.createServer(async (req, res) => {
       lobRes.pipe(res);
     });
  
-    proxy.on('error', (e) => sendJSON(res, 502, { error: { message: 'Proxy error: ' + e.message } }));
+    proxy.setTimeout(PROXY_TIMEOUT_MS, () => proxy.destroy(new Error('Upstream request timed out')));
+    proxy.on('error', (e) => {
+      if (!res.headersSent) {
+        sendJSON(res, 502, { error: { message: 'Proxy error: ' + e.message } });
+      } else {
+        res.destroy(); // response already streaming — just tear it down
+      }
+    });
     if (bodyBuf.length > 0) proxy.write(bodyBuf);
     proxy.end();
     return;
