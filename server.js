@@ -16,6 +16,17 @@ const SESSION_SECRET = process.env.PD_SECRET || crypto.randomBytes(32).toString(
 const COOKIE_NAME = 'pd_session';
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+// Production safety guard: refuse to START with the default/unset password.
+// Gated on require.main so importing this module (e.g. unit tests) never exits;
+// it only fires when run directly as the entrypoint (`node server.js`, including
+// the Docker image which sets NODE_ENV=production). Dev keeps the soft warning
+// printed by server.listen below.
+if (require.main === module && process.env.NODE_ENV === 'production' && (!process.env.PD_PASSWORD || PASSWORD === 'changeme')) {
+  console.error('FATAL: PD_PASSWORD is unset — refusing to start in production with the default password.');
+  console.error('       Set PD_PASSWORD (and PD_USERNAME, PD_SECRET) before deploying.');
+  process.exit(1);
+}
+
 // Request body size limits (bytes)
 const LOGIN_BODY_LIMIT = 16 * 1024;          // 16 KB — the login form is tiny
 const PROXY_BODY_LIMIT = 52 * 1024 * 1024;   // 52 MB — headroom over the 50 MB PDF cap + multipart overhead
@@ -125,40 +136,56 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(ha, hb);
 }
 
-// ── Login rate limiting (per-IP, in-memory) ──
-// Keyed on the socket address. Behind a reverse proxy this is the proxy's
-// IP; we deliberately do NOT trust X-Forwarded-For here because it is
-// client-spoofable and would let an attacker evade the limit.
-const loginAttempts = new Map(); // ip -> { count, first }
+// ── Login rate limiting (in-memory) ──
+// Two parallel buckets, each LOGIN_MAX_ATTEMPTS failures per LOGIN_WINDOW_MS:
+//   • by client IP  — throttles a single source.
+//   • by username   — throttles guessing against one account even when many
+//                     clients share a source IP (behind a proxy), so a spray of
+//                     random usernames can't lock the real user out of their own
+//                     account bucket.
+// IP derivation: we key on the socket address by default. X-Forwarded-For is
+// client-spoofable, so it is trusted ONLY when PD_TRUST_PROXY is explicitly set.
+// Enable PD_TRUST_PROXY ONLY when the app genuinely sits behind a trusted reverse
+// proxy (Railway/Render/nginx); otherwise an attacker can forge XFF to mint
+// unlimited fake client IPs and evade the per-IP limit entirely.
+const TRUST_PROXY = (() => { const v = (process.env.PD_TRUST_PROXY || '').toLowerCase(); return v === '1' || v === 'true'; })();
+const ipAttempts = new Map();   // ip       -> { count, first }
+const userAttempts = new Map(); // username -> { count, first }
 
 function clientIp(req) {
+  if (TRUST_PROXY) {
+    const xff = req.headers['x-forwarded-for'];
+    if (xff) { const first = String(xff).split(',')[0].trim(); if (first) return first; }
+  }
   return req.socket.remoteAddress || 'unknown';
 }
 
-function loginBlocked(ip) {
-  const rec = loginAttempts.get(ip);
+function attemptBlocked(map, key) {
+  const rec = map.get(key);
   if (!rec) return false;
-  if (Date.now() - rec.first > LOGIN_WINDOW_MS) { loginAttempts.delete(ip); return false; }
+  if (Date.now() - rec.first > LOGIN_WINDOW_MS) { map.delete(key); return false; }
   return rec.count >= LOGIN_MAX_ATTEMPTS;
 }
 
-function recordFailedLogin(ip) {
-  const rec = loginAttempts.get(ip);
+function recordAttempt(map, key) {
+  const rec = map.get(key);
   if (!rec || Date.now() - rec.first > LOGIN_WINDOW_MS) {
-    loginAttempts.set(ip, { count: 1, first: Date.now() });
+    map.set(key, { count: 1, first: Date.now() });
   } else {
     rec.count += 1;
   }
 }
 
-function clearLoginAttempts(ip) { loginAttempts.delete(ip); }
+function clearAttempts(map, key) { map.delete(key); }
 
-// Prevent unbounded growth: periodically drop expired attempt records.
+// Prevent unbounded growth: periodically drop expired records from both buckets.
 // unref() so this timer never keeps the process alive on its own.
 setInterval(() => {
   const now = Date.now();
-  for (const [ip, rec] of loginAttempts) {
-    if (now - rec.first > LOGIN_WINDOW_MS) loginAttempts.delete(ip);
+  for (const map of [ipAttempts, userAttempts]) {
+    for (const [key, rec] of map) {
+      if (now - rec.first > LOGIN_WINDOW_MS) map.delete(key);
+    }
   }
 }, LOGIN_WINDOW_MS).unref();
  
@@ -176,6 +203,20 @@ function sendHTML(res, status, html) {
 function redirect(res, url) {
   res.writeHead(302, { 'Location': url });
   res.end();
+}
+
+// Security headers applied to EVERY response. Set via setHeader() at the top of
+// the request handler so they persist through every later writeHead()/pipe()
+// (writeHead merges with, and only overrides on name collision — none here).
+// The CSP is deliberately permissive enough not to break the app: inline
+// <style>/<script>, Google Fonts (CSS from fonts.googleapis.com + font files
+// from fonts.gstatic.com), data: URIs in CSS, and same-origin fetch to /api/lob.
+const CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'";
+function setSecurityHeaders(res) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Content-Security-Policy', CSP);
 }
  
 // ══════════════════════════════════════════════════════════════
@@ -427,6 +468,7 @@ function loginPage(error) {
 // REQUEST ROUTER
 // ══════════════════════════════════════════════════════════════
 const server = http.createServer(async (req, res) => {
+  setSecurityHeaders(res); // every response: pages, static, proxy, redirects, errors
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
  
@@ -440,25 +482,29 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/login' && req.method === 'POST') {
     const ip = clientIp(req);
     const secure = isSecure(req);
-    if (loginBlocked(ip)) {
+    const tooMany = () => {
       res.writeHead(429, { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': String(Math.ceil(LOGIN_WINDOW_MS / 1000)) });
-      return res.end(loginPage('Too many failed attempts. Please wait a few minutes and try again.'));
-    }
+      res.end(loginPage('Too many failed attempts. Please wait a few minutes and try again.'));
+    };
+    if (attemptBlocked(ipAttempts, ip)) return tooMany();
     const body = await readBody(req, res, LOGIN_BODY_LIMIT);
     if (body === null) return; // 413/400 already sent
     const params = new URLSearchParams(body.toString());
     const user = params.get('username') || '';
     const pass = params.get('password') || '';
+    if (user && attemptBlocked(userAttempts, user)) return tooMany();
 
     const userOk = safeEqual(user, USERNAME);
     const passOk = safeEqual(pass, PASSWORD);
     if (userOk && passOk) {
-      clearLoginAttempts(ip);
+      clearAttempts(ipAttempts, ip);
+      clearAttempts(userAttempts, user);
       const token = createSession();
       setCookie(res, token, secure);
       return redirect(res, '/');
     }
-    recordFailedLogin(ip);
+    recordAttempt(ipAttempts, ip);
+    if (user) recordAttempt(userAttempts, user);
     return sendHTML(res, 401, loginPage('Invalid username or password'));
   }
  
@@ -521,25 +567,45 @@ const server = http.createServer(async (req, res) => {
   serveStatic(res, pathname);
 });
  
-server.listen(PORT, () => {
-  console.log('');
-  console.log('  PostDirect is running');
-  console.log('');
-  console.log(`     URL:      http://localhost:${PORT}`);
-  console.log(`     Username: ${USERNAME}`);
-  console.log(`     Password: ${'*'.repeat(PASSWORD.length)}`);
-  console.log('');
-  if (PASSWORD === 'changeme') {
-    console.log('  WARNING: Using default password!');
-    console.log('     Set PD_USERNAME and PD_PASSWORD environment variables.');
+// Only bind the port when run directly (`node server.js`); requiring this module
+// (e.g. from tests) must NOT start the server.
+if (require.main === module) {
+  server.listen(PORT, () => {
     console.log('');
-  }
-  if (!SECRET_FROM_ENV) {
-    console.log('  WARNING: PD_SECRET is not set — using a random per-process secret.');
-    console.log('     Sessions will NOT survive restarts (every user is logged out on');
-    console.log('     restart). Set PD_SECRET to a stable random string in production.');
+    console.log('  PostDirect is running');
     console.log('');
-  }
-  console.log('  Press Ctrl+C to stop.');
-  console.log('');
-});
+    console.log(`     URL:      http://localhost:${PORT}`);
+    console.log(`     Username: ${USERNAME}`);
+    console.log(`     Password: ${'*'.repeat(PASSWORD.length)}`);
+    console.log('');
+    if (PASSWORD === 'changeme') {
+      console.log('  WARNING: Using default password!');
+      console.log('     Set PD_USERNAME and PD_PASSWORD environment variables.');
+      console.log('');
+    }
+    if (!SECRET_FROM_ENV) {
+      console.log('  WARNING: PD_SECRET is not set — using a random per-process secret.');
+      console.log('     Sessions will NOT survive restarts (every user is logged out on');
+      console.log('     restart). Set PD_SECRET to a stable random string in production.');
+      console.log('');
+    }
+    console.log('  Press Ctrl+C to stop.');
+    console.log('');
+  });
+}
+
+// Exported for unit tests (node:test). Requiring this module does not start the
+// server or bind a port (see the require.main guard above).
+module.exports = {
+  signValue,
+  createSession,
+  validateSession,
+  safeEqual,
+  clientIp,
+  attemptBlocked,
+  recordAttempt,
+  clearAttempts,
+  isSecure,
+  parseCookies,
+  setSecurityHeaders,
+};

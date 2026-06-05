@@ -605,9 +605,9 @@
         <div class="header-tagline">Physical mail · USPS</div>
       </div>
     </div>
-    <nav class="header-nav" role="tablist">
-      <button class="nav-tab active" id="view-compose-tab" type="button" role="tab">Compose</button>
-      <button class="nav-tab" id="view-history-tab" type="button" role="tab">History <span class="count" id="history-count">0</span></button>
+    <nav class="header-nav" role="tablist" aria-label="Views">
+      <button class="nav-tab active" id="view-compose-tab" type="button" role="tab" aria-selected="true" aria-controls="view-compose" tabindex="0">Compose</button>
+      <button class="nav-tab" id="view-history-tab" type="button" role="tab" aria-selected="false" aria-controls="view-history" tabindex="-1">History <span class="count" id="history-count">0</span></button>
     </nav>
     <div class="header-meta">
       <div class="env-badge"><span class="env-dot test" id="env-dot"></span><span id="env-label">Test</span></div>
@@ -617,13 +617,13 @@
 
   <main class="main">
     <section class="api-bar">
-      <span class="api-label">API Key</span>
+      <label class="api-label" for="api-key-input">API Key</label>
       <input class="api-input" type="password" id="api-key-input" placeholder="test_... or live_..." autocomplete="off" spellcheck="false" />
       <a class="api-link" href="https://dashboard.lob.com" target="_blank" rel="noopener">Dashboard →</a>
     </section>
 
     <!-- ════════════════ COMPOSE VIEW ════════════════ -->
-    <div id="view-compose">
+    <div id="view-compose" role="tabpanel" aria-labelledby="view-compose-tab">
       <div class="steps" id="steps-bar">
         <div class="steps-track">
           <div class="steps-fill" id="steps-fill" style="width: 0%"></div>
@@ -641,15 +641,15 @@
         <h1 class="section-title">Sender Address</h1>
         <p class="section-desc">Your return address for the letter.</p>
         <div class="form-grid cols-2">
-          <div class="field"><label class="field-label">Full Name <span class="req">*</span></label><input class="field-input" id="from-name" placeholder="Jane Smith" /></div>
-          <div class="field"><label class="field-label">Firm / Company</label><input class="field-input" id="from-company" placeholder="Smith & Associates" /></div>
+          <div class="field"><label class="field-label" for="from-name">Full Name <span class="req">*</span></label><input class="field-input" id="from-name" placeholder="Jane Smith" /></div>
+          <div class="field"><label class="field-label" for="from-company">Firm / Company</label><input class="field-input" id="from-company" placeholder="Smith & Associates" /></div>
         </div>
-        <div class="field"><label class="field-label">Address Line 1 <span class="req">*</span></label><input class="field-input" id="from-line1" placeholder="123 Main Street" /></div>
-        <div class="field"><label class="field-label">Address Line 2</label><input class="field-input" id="from-line2" placeholder="Suite 400" /></div>
+        <div class="field"><label class="field-label" for="from-line1">Address Line 1 <span class="req">*</span></label><input class="field-input" id="from-line1" placeholder="123 Main Street" /></div>
+        <div class="field"><label class="field-label" for="from-line2">Address Line 2</label><input class="field-input" id="from-line2" placeholder="Suite 400" /></div>
         <div class="form-grid cols-3">
-          <div class="field"><label class="field-label">City <span class="req">*</span></label><input class="field-input" id="from-city" placeholder="New York" /></div>
-          <div class="field"><label class="field-label">State <span class="req">*</span></label><input class="field-input" id="from-state" placeholder="NY" /></div>
-          <div class="field"><label class="field-label">ZIP <span class="req">*</span></label><input class="field-input" id="from-zip" placeholder="10001" /></div>
+          <div class="field"><label class="field-label" for="from-city">City <span class="req">*</span></label><input class="field-input" id="from-city" placeholder="New York" /></div>
+          <div class="field"><label class="field-label" for="from-state">State <span class="req">*</span></label><input class="field-input" id="from-state" placeholder="NY" /></div>
+          <div class="field"><label class="field-label" for="from-zip">ZIP <span class="req">*</span></label><input class="field-input" id="from-zip" placeholder="10001" /></div>
         </div>
       </div>
 
@@ -675,7 +675,7 @@
         </div>
         <div id="mode-write">
           <div class="field">
-            <label class="field-label">Letter Body <span class="req">*</span></label>
+            <label class="field-label" for="letter-body">Letter Body <span class="req">*</span></label>
             <textarea class="field-textarea" id="letter-body" rows="16" placeholder="Dear Mr. Doe,&#10;&#10;I am writing to follow up on our recent correspondence regarding...&#10;&#10;Sincerely,&#10;Jane Smith"></textarea>
           </div>
         </div>
@@ -709,7 +709,7 @@
           <div class="options-panel-title">Mailing Options</div>
           <div class="form-grid cols-2">
             <div class="field">
-              <label class="field-label">Mail Class</label>
+              <label class="field-label" for="opt-mail-type">Mail Class</label>
               <select class="field-select" id="opt-mail-type">
                 <option value="usps_first_class">USPS First Class</option>
                 <option value="usps_standard">USPS Standard (Marketing)</option>
@@ -717,7 +717,7 @@
               <div class="field-hint">First Class: 5–7 days, forwarding included. Standard: slower, bulk only.</div>
             </div>
             <div class="field">
-              <label class="field-label">Extra Service</label>
+              <label class="field-label" for="opt-extra-service">Extra Service</label>
               <select class="field-select" id="opt-extra-service">
                 <option value="">None</option>
                 <option value="certified">Certified Mail</option>
@@ -729,7 +729,7 @@
           </div>
           <div class="form-grid cols-2">
             <div class="field">
-              <label class="field-label">Use Type <span class="req">*</span></label>
+              <label class="field-label" for="opt-use-type">Use Type <span class="req">*</span></label>
               <select class="field-select" id="opt-use-type">
                 <option value="operational">Operational</option>
                 <option value="marketing">Marketing</option>
@@ -737,7 +737,7 @@
               <div class="field-hint">Operational: invoices, notices, compliance. Marketing: promotions.</div>
             </div>
             <div class="field">
-              <label class="field-label">Address Placement</label>
+              <label class="field-label" for="opt-address-placement">Address Placement</label>
               <select class="field-select" id="opt-address-placement">
                 <option value="top_first_page">Top of First Page (default)</option>
                 <option value="insert_blank_page">Insert Blank Address Page</option>
@@ -747,7 +747,7 @@
           </div>
           <div class="form-grid cols-2">
             <div class="field">
-              <label class="field-label">Perforated Page</label>
+              <label class="field-label" for="opt-perforated">Perforated Page</label>
               <select class="field-select" id="opt-perforated">
                 <option value="">None</option>
                 <option value="1">Page 1</option>
@@ -757,7 +757,7 @@
               <div class="field-hint">Adds a perforated tear-off (e.g., for remittance slips).</div>
             </div>
             <div class="field">
-              <label class="field-label">Send Date</label>
+              <label class="field-label" for="opt-send-date">Send Date</label>
               <input class="field-input" id="opt-send-date" type="date" />
               <div class="field-hint">Schedule for a future date, or leave blank to send immediately.</div>
             </div>
@@ -768,7 +768,7 @@
             <label class="option-label"><input type="checkbox" id="opt-return-envelope" /> Include return envelope</label>
           </div>
           <div class="field" style="margin-top:18px">
-            <label class="field-label">Description / Memo</label>
+            <label class="field-label" for="opt-description">Description / Memo</label>
             <input class="field-input" id="opt-description" placeholder="e.g., Q4 invoice for Acme Corp" maxlength="255" />
             <div class="field-hint">Internal note for your records (not printed on the letter).</div>
           </div>
@@ -820,7 +820,7 @@
     </div>
 
     <!-- ════════════════ HISTORY VIEW ════════════════ -->
-    <div id="view-history" class="is-hidden">
+    <div id="view-history" class="is-hidden" role="tabpanel" aria-labelledby="view-history-tab">
       <div class="history-header">
         <div class="history-header-text">
           <h1 class="section-title">Sent Letters</h1>
@@ -875,7 +875,10 @@
 
   const $ = id => document.getElementById(id);
   const v = id => $(id).value.trim();
-  const esc = s => { const d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; };
+  // Attribute-safe HTML escaper: covers & < > " ' so values are safe in both
+  // text content and double/single-quoted attribute contexts (data-*, value, href).
+  const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  const esc = s => (s == null ? '' : String(s)).replace(/[&<>"']/g, c => ESC_MAP[c]);
   const isLive = () => $('api-key-input').value.startsWith('live_');
   const apiKey = () => $('api-key-input').value.trim();
 
@@ -1018,21 +1021,21 @@
     const id = r.id;
     const showRemove = total > 1;
     return (
-      '<div class="recipient-card" data-rid="' + id + '">' +
+      '<div class="recipient-card" data-rid="' + esc(id) + '">' +
         '<div class="recipient-card-header">' +
           '<div class="recipient-number">Recipient ' + (index + 1) + '</div>' +
-          (showRemove ? '<button type="button" class="btn-remove-recipient" data-remove="' + id + '">Remove</button>' : '') +
+          (showRemove ? '<button type="button" class="btn-remove-recipient" data-remove="' + esc(id) + '">Remove</button>' : '') +
         '</div>' +
         '<div class="form-grid cols-2">' +
-          '<div class="field"><label class="field-label">Full Name <span class="req">*</span></label><input class="field-input" id="r-' + id + '-name" data-rfield value="' + esc(r.name) + '" placeholder="John Doe" /></div>' +
-          '<div class="field"><label class="field-label">Firm / Company</label><input class="field-input" id="r-' + id + '-company" data-rfield value="' + esc(r.company) + '" placeholder="Doe Industries" /></div>' +
+          '<div class="field"><label class="field-label" for="r-' + id + '-name">Full Name <span class="req">*</span></label><input class="field-input" id="r-' + id + '-name" data-rfield value="' + esc(r.name) + '" placeholder="John Doe" /></div>' +
+          '<div class="field"><label class="field-label" for="r-' + id + '-company">Firm / Company</label><input class="field-input" id="r-' + id + '-company" data-rfield value="' + esc(r.company) + '" placeholder="Doe Industries" /></div>' +
         '</div>' +
-        '<div class="field"><label class="field-label">Address Line 1 <span class="req">*</span></label><input class="field-input" id="r-' + id + '-line1" data-rfield value="' + esc(r.line1) + '" placeholder="456 Oak Avenue" /></div>' +
-        '<div class="field"><label class="field-label">Address Line 2</label><input class="field-input" id="r-' + id + '-line2" data-rfield value="' + esc(r.line2) + '" placeholder="Floor 2" /></div>' +
+        '<div class="field"><label class="field-label" for="r-' + id + '-line1">Address Line 1 <span class="req">*</span></label><input class="field-input" id="r-' + id + '-line1" data-rfield value="' + esc(r.line1) + '" placeholder="456 Oak Avenue" /></div>' +
+        '<div class="field"><label class="field-label" for="r-' + id + '-line2">Address Line 2</label><input class="field-input" id="r-' + id + '-line2" data-rfield value="' + esc(r.line2) + '" placeholder="Floor 2" /></div>' +
         '<div class="form-grid cols-3">' +
-          '<div class="field"><label class="field-label">City <span class="req">*</span></label><input class="field-input" id="r-' + id + '-city" data-rfield value="' + esc(r.city) + '" placeholder="Chicago" /></div>' +
-          '<div class="field"><label class="field-label">State <span class="req">*</span></label><input class="field-input" id="r-' + id + '-state" data-rfield value="' + esc(r.state) + '" placeholder="IL" /></div>' +
-          '<div class="field"><label class="field-label">ZIP <span class="req">*</span></label><input class="field-input" id="r-' + id + '-zip" data-rfield value="' + esc(r.zip) + '" placeholder="60601" /></div>' +
+          '<div class="field"><label class="field-label" for="r-' + id + '-city">City <span class="req">*</span></label><input class="field-input" id="r-' + id + '-city" data-rfield value="' + esc(r.city) + '" placeholder="Chicago" /></div>' +
+          '<div class="field"><label class="field-label" for="r-' + id + '-state">State <span class="req">*</span></label><input class="field-input" id="r-' + id + '-state" data-rfield value="' + esc(r.state) + '" placeholder="IL" /></div>' +
+          '<div class="field"><label class="field-label" for="r-' + id + '-zip">ZIP <span class="req">*</span></label><input class="field-input" id="r-' + id + '-zip" data-rfield value="' + esc(r.zip) + '" placeholder="60601" /></div>' +
         '</div>' +
       '</div>'
     );
@@ -1196,11 +1199,18 @@
   $('tab-upload').addEventListener('click', () => setMode('upload'));
 
   // ═══ Multipart builder ═══
+  // RFC 7578: strip CR/LF and replace " with %22 in any string written into a
+  // multipart header (field name, filename, content-type) to prevent header /
+  // part injection (e.g. a crafted filename forging extra form fields). Field
+  // VALUES live in the body after the blank line and are left byte-for-byte intact.
+  function mpHeaderSafe(s) {
+    return String(s == null ? '' : s).replace(/[\r\n]/g, '').replace(/"/g, '%22');
+  }
   function buildMultipart(fields, fileData, fileName, fileMimeType) {
     const boundary = '----PostDirect' + Math.random().toString(36).slice(2);
     const enc = new TextEncoder(), parts = [];
-    for (const [k, val] of fields) parts.push(enc.encode('--' + boundary + '\r\nContent-Disposition: form-data; name="' + k + '"\r\n\r\n' + val + '\r\n'));
-    parts.push(enc.encode('--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="' + fileName + '"\r\nContent-Type: ' + fileMimeType + '\r\n\r\n'));
+    for (const [k, val] of fields) parts.push(enc.encode('--' + boundary + '\r\nContent-Disposition: form-data; name="' + mpHeaderSafe(k) + '"\r\n\r\n' + val + '\r\n'));
+    parts.push(enc.encode('--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="' + mpHeaderSafe(fileName) + '"\r\nContent-Type: ' + mpHeaderSafe(fileMimeType) + '\r\n\r\n'));
     parts.push(new Uint8Array(fileData));
     parts.push(enc.encode('\r\n--' + boundary + '--\r\n'));
     const total = parts.reduce((s, p) => s + p.byteLength, 0), merged = new Uint8Array(total);
@@ -1574,10 +1584,16 @@
   // ═══ View switching ═══
   function setView(name) {
     currentView = name;
-    $('view-compose').classList.toggle('is-hidden', name !== 'compose');
-    $('view-history').classList.toggle('is-hidden', name !== 'history');
-    $('view-compose-tab').classList.toggle('active', name === 'compose');
-    $('view-history-tab').classList.toggle('active', name === 'history');
+    const composeActive = name === 'compose';
+    $('view-compose').classList.toggle('is-hidden', !composeActive);
+    $('view-history').classList.toggle('is-hidden', composeActive);
+    $('view-compose-tab').classList.toggle('active', composeActive);
+    $('view-history-tab').classList.toggle('active', !composeActive);
+    // Keep ARIA tab state + roving tabindex in sync with the visual state.
+    $('view-compose-tab').setAttribute('aria-selected', composeActive ? 'true' : 'false');
+    $('view-history-tab').setAttribute('aria-selected', composeActive ? 'false' : 'true');
+    $('view-compose-tab').tabIndex = composeActive ? 0 : -1;
+    $('view-history-tab').tabIndex = composeActive ? -1 : 0;
     if (name === 'history') {
       if (apiKey() && historyLoadedKey !== apiKey()) loadAccountHistory({ reset: true });
       else renderHistory();
@@ -1587,6 +1603,26 @@
   // ═══ Events ═══
   $('view-compose-tab').addEventListener('click', () => setView('compose'));
   $('view-history-tab').addEventListener('click', () => setView('history'));
+
+  // Tablist keyboard navigation (WAI-ARIA APG): arrows move focus + activate,
+  // Home/End jump to the first/last tab.
+  (function () {
+    const tabs = [$('view-compose-tab'), $('view-history-tab')];
+    const views = ['compose', 'history'];
+    function go(i) {
+      const n = (i + tabs.length) % tabs.length;
+      setView(views[n]);
+      tabs[n].focus();
+    }
+    tabs.forEach((tab, i) => {
+      tab.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); go(i + 1); }
+        else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); go(i - 1); }
+        else if (e.key === 'Home') { e.preventDefault(); go(0); }
+        else if (e.key === 'End') { e.preventDefault(); go(tabs.length - 1); }
+      });
+    });
+  })();
 
   $('api-key-input').addEventListener('input', function() {
     const l = isLive();

@@ -4,9 +4,10 @@
   "description": "Send physical USPS mail from your browser via Lob API",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
   },
   "engines": {
-    "node": ">=16"
+    "node": ">=18"
   }
 }
