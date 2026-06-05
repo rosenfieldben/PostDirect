@@ -11,31 +11,52 @@ const { URL } = require('url');
 const PORT = parseInt(process.env.PORT || '3491', 10);
 const USERNAME = process.env.PD_USERNAME || 'admin';
 const PASSWORD = process.env.PD_PASSWORD || 'changeme';
+const SECRET_FROM_ENV = !!process.env.PD_SECRET;
 const SESSION_SECRET = process.env.PD_SECRET || crypto.randomBytes(32).toString('hex');
 const COOKIE_NAME = 'pd_session';
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+// Request body size limits (bytes)
+const LOGIN_BODY_LIMIT = 16 * 1024;          // 16 KB — the login form is tiny
+const PROXY_BODY_LIMIT = 52 * 1024 * 1024;   // 52 MB — headroom over the 50 MB PDF cap + multipart overhead
+
+// Login rate limiting (per-IP, in-memory)
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;      // 15 minutes
  
 // ══════════════════════════════════════════════════════════════
-// SESSION STORE (in-memory, survives restarts via cookie re-validation)
+// STATELESS SESSIONS — HMAC-signed cookies, no server-side store
 // ══════════════════════════════════════════════════════════════
-const sessions = new Map();
- 
-function createSession() {
-  const id = crypto.randomBytes(32).toString('hex');
-  const token = crypto.createHmac('sha256', SESSION_SECRET).update(id).digest('hex');
-  sessions.set(token, { created: Date.now() });
-  return token;
+// The cookie value is `<issuedAt>.<signature>` where signature =
+// HMAC-SHA256(PD_SECRET, issuedAt). There is no server-side store, so
+// sessions survive restarts — but ONLY if PD_SECRET is stable across
+// restarts (a random per-process fallback invalidates them; see the
+// startup warning). Stateless sessions cannot be revoked server-side;
+// logout simply clears the cookie.
+function signValue(value) {
+  return crypto.createHmac('sha256', SESSION_SECRET).update(value).digest('hex');
 }
- 
+
+function createSession() {
+  const issuedAt = Date.now().toString();
+  return issuedAt + '.' + signValue(issuedAt);
+}
+
 function validateSession(token) {
   if (!token) return false;
-  const sess = sessions.get(token);
-  if (!sess) return false;
-  if (Date.now() - sess.created > SESSION_MAX_AGE) { sessions.delete(token); return false; }
+  const dot = token.indexOf('.');
+  if (dot < 1) return false;
+  const issuedAt = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  if (!/^[0-9]+$/.test(issuedAt) || !/^[0-9a-f]+$/.test(sig)) return false;
+  const expected = signValue(issuedAt);
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  if (!crypto.timingSafeEqual(a, b)) return false;
+  if (Date.now() - parseInt(issuedAt, 10) > SESSION_MAX_AGE) return false;
   return true;
 }
- 
-function destroySession(token) { sessions.delete(token); }
  
 function parseCookies(header) {
   const cookies = {};
@@ -48,24 +69,88 @@ function getSessionToken(req) {
   return parseCookies(req.headers.cookie)[COOKIE_NAME] || null;
 }
  
-function setCookie(res, token) {
-  res.setHeader('Set-Cookie', `${COOKIE_NAME}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE / 1000}`);
+// Whether the session cookie should carry the Secure attribute.
+// PD_SECURE_COOKIES=1/0 forces on/off; otherwise auto-detect from the
+// X-Forwarded-Proto header set by a TLS-terminating reverse proxy.
+function isSecure(req) {
+  const env = process.env.PD_SECURE_COOKIES;
+  if (env === '1' || env === 'true') return true;
+  if (env === '0' || env === 'false') return false;
+  return (req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase() === 'https';
 }
- 
-function clearCookie(res) {
-  res.setHeader('Set-Cookie', `${COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+
+function setCookie(res, token, secure) {
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE / 1000}${secure ? '; Secure' : ''}`);
+}
+
+function clearCookie(res, secure) {
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure ? '; Secure' : ''}`);
 }
  
 // ══════════════════════════════════════════════════════════════
 // HELPERS
 // ══════════════════════════════════════════════════════════════
-function readBody(req) {
+function readBody(req, res, maxBytes) {
   return new Promise((resolve) => {
     const chunks = [];
-    req.on('data', c => chunks.push(c));
-    req.on('end', () => resolve(Buffer.concat(chunks)));
+    let total = 0;
+    let settled = false;
+    const done = (val) => { if (!settled) { settled = true; resolve(val); } };
+    req.on('data', (c) => {
+      total += c.length;
+      if (total > maxBytes) {
+        if (res && !res.headersSent) {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'Request body too large' } }));
+        }
+        req.destroy();
+        return done(null);
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => done(Buffer.concat(chunks)));
+    req.on('error', () => {
+      if (res && !res.headersSent) { try { res.writeHead(400); res.end(); } catch (e) { /* ignore */ } }
+      done(null);
+    });
   });
 }
+
+// Constant-time credential comparison (hash first so unequal lengths
+// don't throw and length isn't leaked via early exit).
+function safeEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+// ── Login rate limiting (per-IP, in-memory) ──
+// Keyed on the socket address. Behind a reverse proxy this is the proxy's
+// IP; we deliberately do NOT trust X-Forwarded-For here because it is
+// client-spoofable and would let an attacker evade the limit.
+const loginAttempts = new Map(); // ip -> { count, first }
+
+function clientIp(req) {
+  return req.socket.remoteAddress || 'unknown';
+}
+
+function loginBlocked(ip) {
+  const rec = loginAttempts.get(ip);
+  if (!rec) return false;
+  if (Date.now() - rec.first > LOGIN_WINDOW_MS) { loginAttempts.delete(ip); return false; }
+  return rec.count >= LOGIN_MAX_ATTEMPTS;
+}
+
+function recordFailedLogin(ip) {
+  const rec = loginAttempts.get(ip);
+  if (!rec || Date.now() - rec.first > LOGIN_WINDOW_MS) {
+    loginAttempts.set(ip, { count: 1, first: Date.now() });
+  } else {
+    rec.count += 1;
+  }
+}
+
+function clearLoginAttempts(ip) { loginAttempts.delete(ip); }
  
 function sendJSON(res, status, obj) {
   const body = JSON.stringify(obj);
@@ -339,23 +424,33 @@ const server = http.createServer(async (req, res) => {
  
   // ── Login POST ──
   if (pathname === '/login' && req.method === 'POST') {
-    const body = await readBody(req);
+    const ip = clientIp(req);
+    const secure = isSecure(req);
+    if (loginBlocked(ip)) {
+      res.writeHead(429, { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': String(Math.ceil(LOGIN_WINDOW_MS / 1000)) });
+      return res.end(loginPage('Too many failed attempts. Please wait a few minutes and try again.'));
+    }
+    const body = await readBody(req, res, LOGIN_BODY_LIMIT);
+    if (body === null) return; // 413/400 already sent
     const params = new URLSearchParams(body.toString());
-    const user = params.get('username');
-    const pass = params.get('password');
- 
-    if (user === USERNAME && pass === PASSWORD) {
+    const user = params.get('username') || '';
+    const pass = params.get('password') || '';
+
+    const userOk = safeEqual(user, USERNAME);
+    const passOk = safeEqual(pass, PASSWORD);
+    if (userOk && passOk) {
+      clearLoginAttempts(ip);
       const token = createSession();
-      setCookie(res, token);
+      setCookie(res, token, secure);
       return redirect(res, '/');
     }
+    recordFailedLogin(ip);
     return sendHTML(res, 401, loginPage('Invalid username or password'));
   }
  
   // ── Logout ──
   if (pathname === '/logout') {
-    destroySession(getSessionToken(req));
-    clearCookie(res);
+    clearCookie(res, isSecure(req));
     return redirect(res, '/login');
   }
  
@@ -367,7 +462,8 @@ const server = http.createServer(async (req, res) => {
   // ── Lob API proxy ──
   if (pathname.startsWith('/api/lob/')) {
     const lobPath = pathname.replace('/api/lob', '');
-    const bodyBuf = await readBody(req);
+    const bodyBuf = await readBody(req, res, PROXY_BODY_LIMIT);
+    if (bodyBuf === null) return; // 413/400 already sent
  
     const options = {
       hostname: 'api.lob.com',
@@ -414,6 +510,12 @@ server.listen(PORT, () => {
   if (PASSWORD === 'changeme') {
     console.log('  WARNING: Using default password!');
     console.log('     Set PD_USERNAME and PD_PASSWORD environment variables.');
+    console.log('');
+  }
+  if (!SECRET_FROM_ENV) {
+    console.log('  WARNING: PD_SECRET is not set — using a random per-process secret.');
+    console.log('     Sessions will NOT survive restarts (every user is logged out on');
+    console.log('     restart). Set PD_SECRET to a stable random string in production.');
     console.log('');
   }
   console.log('  Press Ctrl+C to stop.');
