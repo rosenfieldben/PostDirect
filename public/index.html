@@ -129,7 +129,8 @@
   .env-dot { width: 6px; height: 6px; border-radius: 50%; box-shadow: 0 0 0 3px rgba(255,255,255,0.6); }
   .env-dot.live { background: var(--success); box-shadow: 0 0 0 3px rgba(23,107,59,0.18); }
   .env-dot.test { background: var(--text-muted); }
-  .sign-out { font-size: 12.5px; color: var(--text-dim); text-decoration: none; transition: color 0.15s; }
+  .sign-out-form { display: inline; margin: 0; }
+  .sign-out { font-size: 12.5px; color: var(--text-dim); text-decoration: none; transition: color 0.15s; background: none; border: none; padding: 0; cursor: pointer; font-family: inherit; }
   .sign-out:hover { color: var(--ink); }
 
   /* ── Main ──────────────────────────────────────────── */
@@ -566,7 +567,7 @@
     </nav>
     <div class="header-meta">
       <div class="env-badge"><span class="env-dot test" id="env-dot"></span><span id="env-label">Test</span></div>
-      <a href="/logout" class="sign-out">Sign out</a>
+      <form method="POST" action="/logout" class="sign-out-form"><button type="submit" class="sign-out">Sign out</button></form>
     </div>
   </header>
 
