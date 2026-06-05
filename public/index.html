@@ -541,6 +541,21 @@
   .tracking-event { display: flex; justify-content: space-between; padding: 5px 0; color: var(--text-dim); }
   .tracking-event:first-child { color: var(--text); font-weight: 500; }
   .tracking-event-date { color: var(--text-muted); font-size: 11.5px; }
+  /* ── Tracking numbers / pending / return-receipt ── */
+  .letter-card-tracking { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-soft); display: flex; flex-direction: column; gap: 7px; }
+  .letter-card-tracking .key, .result-item-track .key { color: var(--text-muted); text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.1em; font-weight: 700; }
+  .tracking-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; color: var(--text-dim); }
+  .tracking-line code { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 11.5px; color: var(--text-dim); background: var(--surface-alt); padding: 2px 7px; border-radius: 5px; }
+  .tracking-link { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 12px; color: var(--cobalt-deep); text-decoration: none; background: var(--cobalt-tint); padding: 2px 8px; border-radius: 5px; font-weight: 600; }
+  .tracking-link:hover { text-decoration: underline; }
+  .tracking-pending { align-self: flex-start; display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 700; color: var(--progress); background: var(--progress-bg); border: 1px solid var(--progress-border); padding: 3px 11px; border-radius: 999px; letter-spacing: 0.01em; }
+  .tracking-hint { font-size: 11.5px; color: var(--text-muted); line-height: 1.5; }
+  .tracking-hint a { color: var(--cobalt-deep); font-weight: 600; text-decoration: none; }
+  .tracking-hint a:hover { text-decoration: underline; }
+  .result-item-track { margin-top: 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); }
+  .result-item-track a { font-family: ui-monospace, 'SF Mono', Menlo, monospace; color: var(--cobalt-deep); text-decoration: none; background: var(--cobalt-tint); padding: 2px 8px; border-radius: 5px; font-weight: 600; }
+  .result-item-note { margin-top: 6px; font-size: 11.5px; color: var(--text-muted); line-height: 1.5; }
+  .history-more { margin-top: 18px; text-align: center; }
 
   /* ── Animations ────────────────────────────────────── */
   @keyframes fadeInUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
@@ -809,7 +824,7 @@
       <div class="history-header">
         <div class="history-header-text">
           <h1 class="section-title">Sent Letters</h1>
-          <p class="section-desc" style="margin-bottom:0">All letters sent from this browser, with live status from Lob.</p>
+          <p class="section-desc" style="margin-bottom:0">Every letter on your Lob account for the API key above — live or test, matching the key’s environment.</p>
         </div>
         <div class="history-actions">
           <span class="history-meta" id="history-last-refreshed"></span>
@@ -837,7 +852,10 @@
 (function() {
   const LOB_BASE = '/api/lob';
   const MAX_RECIPIENTS = 25;
-  const STORAGE_KEY = 'postdirect.history.v1';
+  // History is sourced live from the Lob account (List Letters); no local persistence.
+  const HISTORY_PAGE_LIMIT = 100;   // Lob's max page size for GET /v1/letters
+  const HISTORY_MAX = 200;          // letters loaded per fetch ("Load older" pages beyond this)
+  const TRACKED_SERVICES = ['certified', 'certified_return_receipt', 'registered'];
 
   // ── App state ──
   let currentStep = 0, sending = false;
@@ -846,7 +864,14 @@
   let recipients = [];  // array of { id, name, company, line1, line2, city, state, zip }
   let nextRecipientId = 1;
   let lastSendResults = null;  // array of { recipient, success, id?, error? }
-  let history = [];  // persisted
+  let history = [];                 // current render model (account-sourced)
+  let optimistic = [];              // letters sent this session, shown until the Lob list catches up
+  let historyEnv = null;            // 'live' | 'test' of the currently loaded list
+  let historyNextUrl = null;        // Lob next_url cursor for "Load older"
+  let historyLoadedKey = null;      // the API key the list was last loaded for
+  let historyLoading = false;
+  let historyError = null;
+  let keyDebounce = null;           // debounce auto-load when the key changes on the History view
 
   const $ = id => document.getElementById(id);
   const v = id => $(id).value.trim();
@@ -854,22 +879,118 @@
   const isLive = () => $('api-key-input').value.startsWith('live_');
   const apiKey = () => $('api-key-input').value.trim();
 
-  // ═══ Storage ═══
-  function loadHistory() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      history = raw ? JSON.parse(raw) : [];
-      if (!Array.isArray(history)) history = [];
-    } catch (e) { history = []; }
-    updateHistoryCount();
-  }
-  function saveHistory() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(history)); }
-    catch (e) { console.warn('Could not save history:', e); }
-    updateHistoryCount();
-  }
+  // ═══ History engine (sourced from the Lob account via List Letters) ═══
   function updateHistoryCount() {
     $('history-count').textContent = history.length;
+  }
+  function authHeaders() {
+    return { 'Authorization': 'Basic ' + btoa(apiKey() + ':') };
+  }
+  function isTrackedService(es) { return TRACKED_SERVICES.indexOf(es) !== -1; }
+  function uspsTrackingUrl(num) {
+    return 'https://tools.usps.com/go/TrackConfirmAction?tLabels=' + encodeURIComponent(num);
+  }
+  // Lob's next_url is an absolute api.lob.com URL — route it back through our same-origin proxy.
+  function toProxyUrl(u) {
+    try { const p = new URL(u, 'https://api.lob.com'); return LOB_BASE + p.pathname + p.search; }
+    catch (e) { return LOB_BASE + (String(u).charAt(0) === '/' ? u : '/' + u); }
+  }
+  // Map a Lob letter object onto the existing history render shape.
+  function mapLobLetter(L, envMode, fetchedAt) {
+    const to = (L && typeof L.to === 'object' && L.to) ? L.to : {};
+    const cityStateZip = [to.address_city, to.address_state, to.address_zip].filter(Boolean).join(', ');
+    const addr = [to.address_line1, to.address_line2, cityStateZip].filter(Boolean).join(' · ');
+    return {
+      id: L.id,
+      recipient_name: (typeof to.name === 'string' ? to.name : '') || '',
+      recipient_company: to.company || '',
+      recipient_address: addr,
+      sender_name: (L.from && typeof L.from === 'object' && L.from.name) ? L.from.name : '',
+      date_sent: L.date_created || null,             // Lob's date_created -> existing 'date_sent' field
+      send_date: L.send_date || null,
+      expected_delivery_date: L.expected_delivery_date || null,
+      mail_type: L.mail_type || null,
+      extra_service: L.extra_service || null,
+      tracking_number: L.tracking_number || null,
+      description: L.description || '',
+      mode: envMode,
+      last_refreshed: fetchedAt,
+      tracking_events: Array.isArray(L.tracking_events) ? L.tracking_events : [],
+      deleted: !!L.deleted,
+      fetch_error: null,
+      _lob: true,
+    };
+  }
+  function setHistoryLoading(loading) {
+    const btn = $('btn-refresh-all');
+    if (btn) { btn.disabled = loading; btn.textContent = loading ? 'Loading…' : 'Refresh all'; }
+  }
+  // Fetch the account's letters through the proxy, paging via next_url up to a cap.
+  async function loadAccountHistory(opts) {
+    opts = opts || {};
+    const reset = opts.reset !== false;
+    const key = apiKey();
+    if (!key) {
+      history = []; historyEnv = null; historyNextUrl = null; historyLoadedKey = null; historyError = null;
+      updateHistoryCount(); renderHistory(); return;
+    }
+    if (historyLoading) return;
+    const env = isLive() ? 'live' : 'test';
+    historyLoading = true; historyError = null;
+    setHistoryLoading(true); renderHistory();
+    const fetchedAt = new Date().toISOString();
+    const seen = {};
+    let collected = [];
+    if (!reset) { collected = history.filter(h => h._lob && h.mode === env); collected.forEach(e => { seen[e.id] = true; }); }
+    let url = reset ? ('/v1/letters?limit=' + HISTORY_PAGE_LIMIT) : historyNextUrl;
+    const target = collected.length + HISTORY_MAX;
+    let guard = 0;
+    try {
+      while (url && collected.length < target && guard < 60) {
+        guard++;
+        const resp = await fetch(toProxyUrl(url), { method: 'GET', headers: authHeaders() });
+        let data;
+        try { data = await resp.json(); } catch (e) { throw new Error('Unexpected response from Lob (HTTP ' + resp.status + ')'); }
+        if (data && data.error) throw new Error((data.error && data.error.message) || 'Lob API error');
+        const letters = Array.isArray(data.data) ? data.data : [];
+        for (let k = 0; k < letters.length; k++) {
+          const L = letters[k];
+          if (!L || !L.id || seen[L.id]) continue;
+          seen[L.id] = true;
+          collected.push(mapLobLetter(L, env, fetchedAt));
+        }
+        url = data.next_url || null;
+      }
+      historyNextUrl = url;            // null when fully paged; otherwise the cursor for "Load older"
+      historyEnv = env;
+      historyLoadedKey = key;
+      const opt = optimistic.filter(o => o.mode === env && !seen[o.id]);  // keep just-sent letters not yet in the list
+      history = opt.concat(collected);
+    } catch (e) {
+      historyError = e.message || 'Could not load mail history';
+    } finally {
+      historyLoading = false;
+      setHistoryLoading(false);
+      updateHistoryCount();
+      renderHistory();
+    }
+  }
+  // Copy-to-clipboard with a graceful, dependency-free fallback.
+  function copyText(text, btn) {
+    const flash = () => { if (btn) { const o = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = o; }, 1200); } };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(flash).catch(() => fallbackCopy(text, flash));
+    } else { fallbackCopy(text, flash); }
+  }
+  function fallbackCopy(text, done) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); document.body.removeChild(ta);
+      if (done) done();
+    } catch (e) { /* clipboard unavailable; no-op */ }
   }
 
   // ═══ Sender / Recipients data ═══
@@ -1155,14 +1276,15 @@
         const data = await resp.json();
         if (data.error) throw new Error(data.error.message);
         results.push({ recipient: to, success: true, data });
-        // Persist to history immediately so partial failures still record successes
-        history.unshift({
+        // Optimistic entry so a freshly sent letter shows immediately. It de-dupes
+        // against the Lob list by id the next time History loads (Lob's object wins).
+        const entry = {
           id: data.id,
           recipient_name: to.name,
           recipient_company: to.company || '',
           recipient_address: [to.line1, to.line2, [to.city, to.state, to.zip].filter(Boolean).join(', ')].filter(Boolean).join(' · '),
           sender_name: getFrom().name,
-          date_sent: new Date().toISOString(),
+          date_sent: data.date_created || new Date().toISOString(),
           send_date: data.send_date || null,
           expected_delivery_date: data.expected_delivery_date || null,
           mail_type: data.mail_type || $('opt-mail-type').value,
@@ -1171,11 +1293,14 @@
           description: data.description || ($('opt-description').value.trim() || ''),
           mode: live ? 'live' : 'test',
           last_refreshed: new Date().toISOString(),
-          tracking_events: data.tracking_events || [],
+          tracking_events: Array.isArray(data.tracking_events) ? data.tracking_events : [],
           deleted: !!data.deleted,
           fetch_error: null,
-        });
-        saveHistory();
+          _lob: false,
+        };
+        optimistic.unshift(entry);
+        history.unshift(entry);
+        updateHistoryCount();
       } catch (e) {
         results.push({ recipient: to, success: false, error: e.message || 'Unknown error' });
       }
@@ -1210,16 +1335,30 @@
     $('success-results').innerHTML = results.map(r => {
       const badge = r.success ? '<span class="status-badge success">Mailed</span>' : '<span class="status-badge error">Failed</span>';
       const sub = r.success ? '<div class="result-item-sub">' + esc(r.data.id) + '</div>' : '<div class="result-item-error">' + esc(r.error) + '</div>';
+      let track = '';
+      if (r.success && isTrackedService(r.data && r.data.extra_service)) {
+        const tn = r.data && r.data.tracking_number;
+        if (tn && live) {
+          track = '<div class="result-item-track"><span class="key">Tracking</span> ' +
+            '<a href="' + esc(uspsTrackingUrl(tn)) + '" target="_blank" rel="noopener">' + esc(tn) + '</a>' +
+            '<button class="btn-mini" type="button" data-copy="' + esc(tn) + '">Copy</button></div>';
+        } else if (live) {
+          track = '<div class="result-item-note">Tracking number will appear in History once USPS assigns it (up to ~3 business days). Use “Refresh all” there to check.</div>';
+        } else {
+          track = '<div class="result-item-note">Test mode — test sends don’t get a real tracking number.</div>';
+        }
+      }
       return (
         '<div class="result-item">' +
           '<div class="result-item-left">' +
             '<div class="result-item-name">' + esc(r.recipient.name || '(unnamed)') + '</div>' +
-            sub +
+            sub + track +
           '</div>' +
           badge +
         '</div>'
       );
     }).join('');
+    $('success-results').querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copyText(b.getAttribute('data-copy'), b)));
     goToStep(4);
   }
 
@@ -1268,10 +1407,32 @@
   // ═══ History view ═══
   function renderHistory() {
     const list = $('history-list');
-    $('history-empty').classList.toggle('is-hidden', history.length !== 0);
-    if (history.length === 0) { list.innerHTML = ''; return; }
+    const empty = $('history-empty');
+    const emptyTitle = empty.querySelector('.history-empty-title');
+    const emptyDesc = empty.querySelector('.history-empty-desc');
 
-    list.innerHTML = history.map(h => {
+    if (history.length === 0) {
+      empty.classList.remove('is-hidden');
+      list.innerHTML = '';
+      if (historyLoading) {
+        emptyTitle.textContent = 'Loading…';
+        emptyDesc.textContent = 'Fetching your mail from Lob.';
+      } else if (!apiKey()) {
+        emptyTitle.textContent = 'API key required';
+        emptyDesc.textContent = 'Enter your Lob API key above to load your mail history.';
+      } else if (historyError) {
+        emptyTitle.textContent = 'Couldn’t load history';
+        emptyDesc.textContent = historyError;
+      } else {
+        emptyTitle.textContent = 'No letters found';
+        emptyDesc.textContent = 'No ' + (historyEnv === 'live' ? 'live' : 'test') + ' letters on this Lob account for the API key above.';
+      }
+      $('history-last-refreshed').textContent = '';
+      return;
+    }
+    empty.classList.add('is-hidden');
+
+    const cards = history.map(h => {
       const status = deriveStatus(h);
       const badge = '<span class="status-badge ' + status.variant + '">' + esc(status.label) + '</span>';
       const metaBits = [];
@@ -1285,15 +1446,41 @@
         const el = {'certified':'Certified','certified_return_receipt':'Certified + RR','registered':'Registered'};
         metaBits.push('<span>' + esc(el[h.extra_service] || h.extra_service) + '</span>');
       }
-      if (h.tracking_number) metaBits.push('<span><span class="key">Tracking</span> <code>' + esc(h.tracking_number) + '</code></span>');
       metaBits.push('<span><code>' + esc(h.id) + '</code></span>');
       if (h.mode === 'test') metaBits.push('<span style="color:var(--text-muted)">Test</span>');
 
+      // Tracking number / pending state / return-receipt pointer
+      const tracked = isTrackedService(h.extra_service);
+      const liveEntry = h.mode === 'live';
+      let trackHtml = '';
+      if (h.tracking_number) {
+        if (liveEntry) {
+          const url = uspsTrackingUrl(h.tracking_number);
+          trackHtml = '<div class="letter-card-tracking">' +
+            '<div class="tracking-line"><span class="key">Tracking</span> ' +
+              '<a class="tracking-link" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(h.tracking_number) + '</a>' +
+              '<button class="btn-mini" type="button" data-copy="' + esc(h.tracking_number) + '">Copy</button>' +
+            '</div>';
+          if (h.extra_service === 'certified_return_receipt') {
+            trackHtml += '<div class="tracking-hint"><a href="' + esc(url) + '" target="_blank" rel="noopener">Return receipt ↗</a> — the signed receipt isn’t exposed by Lob; open USPS tracking and choose “Return Receipt Email” to receive the signature PDF.</div>';
+          }
+          trackHtml += '</div>';
+        } else {
+          // Test mode: Lob returns a dummy number — show it, but not as a USPS link.
+          trackHtml = '<div class="letter-card-tracking"><div class="tracking-line"><span class="key">Tracking</span> <code>' + esc(h.tracking_number) + '</code> <span class="tracking-hint" style="margin:0">test — not a real USPS number</span></div></div>';
+        }
+      } else if (tracked && liveEntry) {
+        trackHtml = '<div class="letter-card-tracking">' +
+          '<span class="tracking-pending">Tracking number pending</span>' +
+          '<div class="tracking-hint">Certified &amp; registered numbers can take up to ~3 business days to appear. Use “Refresh all” to check again.</div>' +
+        '</div>';
+      }
+
       // Tracking events (if any)
-      let trackingHtml = '';
+      let eventsHtml = '';
       if (Array.isArray(h.tracking_events) && h.tracking_events.length > 0) {
         const sorted = h.tracking_events.slice().sort((a, b) => new Date(b.time || b.date_created || 0) - new Date(a.time || a.date_created || 0));
-        trackingHtml = '<div class="tracking-events">' + sorted.slice(0, 4).map(e =>
+        eventsHtml = '<div class="tracking-events">' + sorted.slice(0, 4).map(e =>
           '<div class="tracking-event"><span>' + esc(e.name || e.type || 'Event') + (e.location ? ' · ' + esc(e.location) : '') + '</span><span class="tracking-event-date">' + esc(formatShortDate(e.time || e.date_created)) + '</span></div>'
         ).join('') + '</div>';
       }
@@ -1312,28 +1499,36 @@
             '</div>' +
           '</div>' +
           '<div class="letter-card-meta">' + metaBits.join('<span class="sep">·</span>') + '</div>' +
-          trackingHtml +
+          trackHtml +
+          eventsHtml +
         '</div>'
       );
     }).join('');
 
+    const moreHtml = historyNextUrl ? '<div class="history-more"><button class="btn btn-secondary" id="btn-load-more" type="button">Load older letters</button></div>' : '';
+    list.innerHTML = cards + moreHtml;
+
     list.querySelectorAll('[data-refresh]').forEach(b => b.addEventListener('click', () => refreshOne(b.getAttribute('data-refresh'))));
     list.querySelectorAll('[data-delete]').forEach(b => b.addEventListener('click', () => removeFromHistory(b.getAttribute('data-delete'))));
+    list.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copyText(b.getAttribute('data-copy'), b)));
+    const moreBtn = $('btn-load-more');
+    if (moreBtn) moreBtn.addEventListener('click', () => loadAccountHistory({ reset: false }));
 
-    // "Last refreshed" summary
-    const lastTimes = history.map(h => h.last_refreshed).filter(Boolean).map(t => new Date(t).getTime());
-    if (lastTimes.length > 0) {
-      const latest = Math.max.apply(null, lastTimes);
-      $('history-last-refreshed').textContent = 'Last refreshed ' + formatRelativeTime(new Date(latest).toISOString());
+    // Summary: count + environment of the loaded list
+    if (historyError) {
+      $('history-last-refreshed').textContent = historyError;
     } else {
-      $('history-last-refreshed').textContent = '';
+      const envLabel = historyEnv === 'live' ? 'live' : 'test';
+      const shown = history.length;
+      $('history-last-refreshed').textContent = shown + (historyNextUrl ? '+' : '') + ' ' + envLabel + ' letter' + (shown === 1 ? '' : 's');
     }
   }
 
   function removeFromHistory(id) {
-    if (!confirm('Remove this letter from your local history? (The letter itself is not affected on Lob.)')) return;
+    if (!confirm('Hide this letter from the list? It remains on your Lob account and will reappear when you reload History.')) return;
     history = history.filter(h => h.id !== id);
-    saveHistory();
+    optimistic = optimistic.filter(h => h.id !== id);
+    updateHistoryCount();
     renderHistory();
   }
 
@@ -1366,33 +1561,14 @@
     const btn = document.querySelector('[data-refresh="' + id + '"]');
     if (btn) { btn.disabled = true; btn.textContent = '…'; }
     await fetchStatusForLetter(h);
-    saveHistory();
     renderHistory();
   }
 
   async function refreshAll() {
-    if (!apiKey()) { alert('Enter your Lob API key at the top of the page to refresh status.'); return; }
-    if (history.length === 0) return;
-    const btn = $('btn-refresh-all');
-    btn.disabled = true;
-    const originalText = btn.textContent;
-    // Simple concurrency pool of 3
-    let cursor = 0, done = 0;
-    const total = history.length;
-    btn.textContent = 'Refreshing 0/' + total;
-    async function worker() {
-      while (cursor < history.length) {
-        const idx = cursor++;
-        await fetchStatusForLetter(history[idx]);
-        done++;
-        btn.textContent = 'Refreshing ' + done + '/' + total;
-      }
-    }
-    await Promise.all([worker(), worker(), worker()]);
-    saveHistory();
-    renderHistory();
-    btn.disabled = false;
-    btn.textContent = originalText;
+    if (!apiKey()) { alert('Enter your Lob API key at the top of the page to load your mail history.'); return; }
+    // Reloading the account list IS the tracking refresh: each letter returns its
+    // current tracking_number and tracking_events.
+    await loadAccountHistory({ reset: true });
   }
 
   // ═══ View switching ═══
@@ -1402,7 +1578,10 @@
     $('view-history').classList.toggle('is-hidden', name !== 'history');
     $('view-compose-tab').classList.toggle('active', name === 'compose');
     $('view-history-tab').classList.toggle('active', name === 'history');
-    if (name === 'history') renderHistory();
+    if (name === 'history') {
+      if (apiKey() && historyLoadedKey !== apiKey()) loadAccountHistory({ reset: true });
+      else renderHistory();
+    }
   }
 
   // ═══ Events ═══
@@ -1413,6 +1592,12 @@
     const l = isLive();
     $('env-dot').className = 'env-dot ' + (l ? 'live' : 'test');
     $('env-label').textContent = l ? 'Live' : 'Test';
+    historyLoadedKey = null;  // key changed — History reloads next time it opens
+    if (currentView === 'history') {
+      clearTimeout(keyDebounce);
+      if (apiKey()) keyDebounce = setTimeout(() => loadAccountHistory({ reset: true }), 600);
+      else renderHistory();   // cleared key -> show the "enter your key" empty state
+    }
     if (currentStep === 3) refreshNextBtn();
   });
 
@@ -1446,7 +1631,7 @@
   $('btn-refresh-all').addEventListener('click', refreshAll);
 
   // ═══ Init ═══
-  loadHistory();
+  updateHistoryCount();
   // Start with one empty recipient card
   recipients = [{ id: nextRecipientId++, name: '', company: '', line1: '', line2: '', city: '', state: '', zip: '' }];
   renderRecipients();
