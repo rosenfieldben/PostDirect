@@ -80,18 +80,22 @@ node server.js
 
 ## Environment Variables
 
-| Variable      | Required | Default    | Description                     |
-|---------------|----------|------------|---------------------------------|
-| `PD_USERNAME` | Yes      | `admin`    | Login username                  |
-| `PD_PASSWORD` | Yes      | `changeme` | Login password                  |
-| `PD_SECRET`   | No       | (random)   | Session encryption key          |
-| `PORT`        | No       | `3491`     | Server port                     |
+| Variable             | Required | Default    | Description                                                                                          |
+|----------------------|----------|------------|------------------------------------------------------------------------------------------------------|
+| `PD_USERNAME`        | Yes      | `admin`    | Login username                                                                                        |
+| `PD_PASSWORD`        | Yes      | `changeme` | Login password                                                                                        |
+| `PD_SECRET`          | Rec.     | (random)   | Secret key used to **sign** session cookies (HMAC-SHA256 — nothing is encrypted). Must be a stable random string, or sessions are invalidated on every restart. |
+| `PD_SECURE_COOKIES`  | No       | (auto)     | `1`/`0` to force the cookie `Secure` flag on/off. Default auto-detects HTTPS via `X-Forwarded-Proto`. |
+| `PORT`               | No       | `3491`     | Server port                                                                                          |
 
 ## Security Notes
 
 - Always change the default password before deploying
 - Use HTTPS in production (most cloud hosts provide this automatically)
-- Sessions expire after 7 days
+- Set a stable `PD_SECRET` in production — sessions are HMAC-signed with it, so a random per-process fallback logs everyone out on each restart (the server warns at startup if it is unset)
+- Sessions are stateless signed cookies and expire after 7 days; logout clears the cookie (there is no server-side revocation)
+- Login uses constant-time credential comparison and per-IP rate limiting (5 attempts / 15 min) to blunt brute-force attempts
+- Request bodies are size-capped (16 KB for login, 52 MB for the Lob proxy) to prevent memory-exhaustion
 - The Lob API key is entered in-browser and proxied server-side (never stored)
 - No data is logged or persisted on the server
 
@@ -102,7 +106,6 @@ PostDirect/
 ├── server.js         # Auth + proxy server (zero dependencies)
 ├── package.json      # Node.js manifest
 ├── Dockerfile        # Docker deployment
-├── .env.example      # Environment variable template
 ├── public/
 │   └── index.html    # The PostDirect app
 └── README.md
