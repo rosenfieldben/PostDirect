@@ -595,8 +595,10 @@ if (require.main === module) {
 }
 
 // Exported for unit tests (node:test). Requiring this module does not start the
-// server or bind a port (see the require.main guard above).
+// server or bind a port (see the require.main guard above). Integration tests
+// call server.listen(0) themselves on an ephemeral port.
 module.exports = {
+  server,
   signValue,
   createSession,
   validateSession,
