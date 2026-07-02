@@ -129,6 +129,24 @@ test('lockout regression: correct credentials always log in, even with the usern
   assert.strictEqual(wrong.status, 401, 'buckets were cleared by the successful login');
 });
 
+test('HSTS is sent when the connection is secure and absent otherwise', async () => {
+  // isSecure reads PD_SECURE_COOKIES per call, so flipping process.env inside
+  // the test works without re-requiring the server. Restore in finally so a
+  // failing assertion cannot leak the override into later tests.
+  const prev = process.env.PD_SECURE_COOKIES;
+  try {
+    process.env.PD_SECURE_COOKIES = '1';
+    const secure = await request({ path: '/login', method: 'GET' });
+    assert.strictEqual(secure.headers['strict-transport-security'], 'max-age=15552000');
+  } finally {
+    if (prev === undefined) delete process.env.PD_SECURE_COOKIES;
+    else process.env.PD_SECURE_COOKIES = prev;
+  }
+  const plain = await request({ path: '/login', method: 'GET' });
+  assert.strictEqual(plain.headers['strict-transport-security'], undefined,
+    'no HSTS over plain HTTP');
+});
+
 test('traversal guard: nothing outside public/ is served', async () => {
   // Authenticate first so the request reaches serveStatic instead of bouncing
   // off the auth gate; the guard under test is the path check, not the login.

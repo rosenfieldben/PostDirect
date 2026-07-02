@@ -485,6 +485,11 @@ function loginPage(error) {
 // ══════════════════════════════════════════════════════════════
 const server = http.createServer(async (req, res) => {
   setSecurityHeaders(res); // every response: pages, static, proxy, redirects, errors
+  // HSTS must only be sent over HTTPS per spec (browsers ignore it on plain
+  // HTTP, and sending it there could poison local-dev setups), hence the
+  // isSecure gate. Kept out of setSecurityHeaders on purpose: that function
+  // deliberately takes no req, and its tests call it without one.
+  if (isSecure(req)) res.setHeader('Strict-Transport-Security', 'max-age=15552000');
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
  
@@ -564,6 +569,11 @@ const server = http.createServer(async (req, res) => {
     delete options.headers['referer'];
     delete options.headers['cookie'];
     delete options.headers['accept-encoding']; // prevent Lob from returning gzipped JSON we'd forward un-decoded
+    // The proxy buffers the full body and writes it as one buffer, so Node
+    // must compute framing from that buffer; forwarding the client's framing
+    // headers can desynchronize them from the actual bytes written.
+    delete options.headers['transfer-encoding'];
+    delete options.headers['content-length'];
  
     const proxy = https.request(options, (lobRes) => {
       res.writeHead(lobRes.statusCode, {
@@ -574,10 +584,13 @@ const server = http.createServer(async (req, res) => {
  
     proxy.setTimeout(PROXY_TIMEOUT_MS, () => proxy.destroy(new Error('Upstream request timed out')));
     proxy.on('error', (e) => {
+      // Log the real error server-side only: upstream error strings can leak
+      // internals (addresses, TLS details) and are useless to the browser.
+      console.error('Lob proxy error:', e);
       if (!res.headersSent) {
-        sendJSON(res, 502, { error: { message: 'Proxy error: ' + e.message } });
+        sendJSON(res, 502, { error: { message: 'Upstream request failed' } });
       } else {
-        res.destroy(); // response already streaming — just tear it down
+        res.destroy(); // response already streaming, just tear it down
       }
     });
     if (bodyBuf.length > 0) proxy.write(bodyBuf);
@@ -614,6 +627,16 @@ if (require.main === module) {
       console.log('  WARNING: PD_SECRET is not set — using a random per-process secret.');
       console.log('     Sessions will NOT survive restarts (every user is logged out on');
       console.log('     restart). Set PD_SECRET to a stable random string in production.');
+      console.log('');
+    }
+    // Sessions are only as strong as the HMAC key: a short secret makes the
+    // cookie signatures brute-forceable offline. (The random fallback above is
+    // 64 hex chars, so this only fires for an explicitly set weak secret.)
+    if (SECRET_FROM_ENV && SESSION_SECRET.length < 32) {
+      console.log('  WARNING: PD_SECRET is shorter than 32 characters.');
+      console.log('     Session cookies are HMAC-signed with it; a short secret can be');
+      console.log('     brute-forced. Use at least 32 random characters, e.g.');
+      console.log('     openssl rand -hex 32');
       console.log('');
     }
     console.log('  Press Ctrl+C to stop.');
