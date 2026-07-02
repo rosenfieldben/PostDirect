@@ -98,7 +98,7 @@ sanitization, and the history status-derivation logic.
 |----------------------|----------|------------|------------------------------------------------------------------------------------------------------|
 | `PD_USERNAME`        | Yes      | `admin`    | Login username                                                                                        |
 | `PD_PASSWORD`        | Yes      | `changeme` | Login password                                                                                        |
-| `PD_SECRET`          | Rec.     | (random)   | Secret key used to **sign** session cookies (HMAC-SHA256 — nothing is encrypted). Must be a stable random string, or sessions are invalidated on every restart. |
+| `PD_SECRET`          | Rec.     | (random)   | Secret key used to **sign** session cookies (HMAC-SHA256, nothing is encrypted). Must be a stable random string, or sessions are invalidated on every restart. The server warns at startup if it is shorter than 32 characters. |
 | `PD_SECURE_COOKIES`  | No       | (auto)     | `1`/`0` to force the cookie `Secure` flag on/off. Default auto-detects HTTPS via `X-Forwarded-Proto`. |
 | `PD_TRUST_PROXY`     | No       | `0`        | `1`/`true` to derive the client IP for login rate-limiting from the leftmost `X-Forwarded-For` entry. **Enable ONLY behind a trusted reverse proxy** (Railway/Render/nginx); otherwise clients can spoof `X-Forwarded-For` to evade the per-IP limit. |
 | `NODE_ENV`           | No       | —          | When set to `production`, the server **refuses to start** if `PD_PASSWORD` is unset (no silent `changeme` fallback). The Docker image sets this automatically. |
@@ -110,11 +110,12 @@ sanitization, and the history status-derivation logic.
 - Use HTTPS in production (most cloud hosts provide this automatically)
 - Set a stable `PD_SECRET` in production — sessions are HMAC-signed with it, so a random per-process fallback logs everyone out on each restart (the server warns at startup if it is unset)
 - Sessions are stateless signed cookies and expire after 7 days; logout clears the cookie (there is no server-side revocation)
-- Login uses constant-time credential comparison plus rate limiting (5 attempts / 15 min) across **two** parallel buckets — per client IP **and** per username — so brute-force and random-username spray are both blunted, even when clients share a source IP behind a proxy (see `PD_TRUST_PROXY`)
+- Login uses constant-time credential comparison plus rate limiting (5 failed attempts / 15 min) across **two** parallel buckets, per client IP **and** per username, so brute-force and random-username spray are both blunted, even when clients share a source IP behind a proxy (see `PD_TRUST_PROXY`). The buckets only throttle **failed** attempts: correct credentials always log in, so forged failures against the known username cannot lock the real owner out. Bucket keys are capped at 256 characters and each bucket at 10,000 entries, bounding attacker-controlled memory between cleanup sweeps
 - In production (`NODE_ENV=production`) the server refuses to start with the default/unset `PD_PASSWORD` — failing fast instead of silently running on `changeme`
-- Every response carries hardening headers: a `Content-Security-Policy` (scripts/styles/connections locked to same-origin + Google Fonts, framing disabled), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer`
+- Every response carries hardening headers: a `Content-Security-Policy` (scripts/styles/connections locked to same-origin + Google Fonts, framing disabled), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer`; HTTPS responses additionally carry `Strict-Transport-Security` (180 days)
 - Frontend output is HTML-escaped including quotes (safe in attribute contexts), and the multipart builder sanitizes header fields (filename, field names) against CRLF/quote injection
 - Request bodies are size-capped (16 KB for login, 52 MB for the Lob proxy) to prevent memory-exhaustion
+- Every send carries a per-recipient Lob idempotency key that is reused on retry, so re-clicking Mail after a network failure cannot double-mail a letter
 - The Lob API key is entered in-browser and proxied server-side (never stored)
 - No data is logged or persisted on the server
 
