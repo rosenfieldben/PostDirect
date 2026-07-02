@@ -98,7 +98,7 @@ sanitization, and the history status-derivation logic.
 |----------------------|----------|------------|------------------------------------------------------------------------------------------------------|
 | `PD_USERNAME`        | Yes      | `admin`    | Login username                                                                                        |
 | `PD_PASSWORD`        | Yes      | `changeme` | Login password                                                                                        |
-| `PD_SECRET`          | Rec.     | (random)   | Secret key used to **sign** session cookies (HMAC-SHA256 — nothing is encrypted). Must be a stable random string, or sessions are invalidated on every restart. The server warns at startup if it is shorter than 32 characters. |
+| `PD_SECRET`          | Rec.     | (random)   | Secret key used to **sign** session cookies (HMAC-SHA256, nothing is encrypted). Must be a stable random string, or sessions are invalidated on every restart. The server warns at startup if it is shorter than 32 characters. |
 | `PD_SECURE_COOKIES`  | No       | (auto)     | `1`/`0` to force the cookie `Secure` flag on/off. Default auto-detects HTTPS via `X-Forwarded-Proto`. |
 | `PD_TRUST_PROXY`     | No       | `0`        | `1`/`true` to derive the client IP for login rate-limiting from the leftmost `X-Forwarded-For` entry. **Enable ONLY behind a trusted reverse proxy** (Railway/Render/nginx); otherwise clients can spoof `X-Forwarded-For` to evade the per-IP limit. |
 | `NODE_ENV`           | No       | —          | When set to `production`, the server **refuses to start** if `PD_PASSWORD` is unset (no silent `changeme` fallback). The Docker image sets this automatically. |

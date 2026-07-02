@@ -714,7 +714,7 @@
                 <option value="usps_first_class">USPS First Class</option>
                 <option value="usps_standard">USPS Standard (Marketing)</option>
               </select>
-              <div class="field-hint">First Class: 5–7 days, forwarding included. Standard: slower, bulk only.</div>
+              <div class="field-hint">First Class: 5–7 days, forwarding included. Standard: slower, bulk only. Locked to First Class while an extra service is selected.</div>
             </div>
             <div class="field">
               <label class="field-label" for="opt-extra-service">Extra Service</label>
@@ -1233,7 +1233,11 @@
   function buildLetterPayload() {
     if (contentMode === 'write') {
       const body = $('letter-body').value;
-      const lines = body.split('\n').map(l => l === '' ? '<br/>' : '<p style="margin:0 0 4px">' + l.replace(/</g,'&lt;') + '</p>').join('');
+      // Escape & before <: without the ampersand escape, literally typed
+      // entities like &amp; collapse when the HTML renders, so the printed
+      // letter would not match what the user typed. Order matters: escaping
+      // & after < would double-escape the &lt; just produced.
+      const lines = body.split('\n').map(l => l === '' ? '<br/>' : '<p style="margin:0 0 4px">' + l.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</p>').join('');
       const html = '<html><head><meta charset="UTF-8"><style>body{font-family:Georgia,serif;font-size:12pt;line-height:1.7;color:#1a1a1a;padding:0.75in 1in;}</style></head><body>' + lines + '</body></html>';
       return { buffer: new TextEncoder().encode(html).buffer, name: 'letter.html', mime: 'text/html' };
     }
@@ -1671,6 +1675,17 @@
     if (e.target.classList && (e.target.classList.contains('field-input') || e.target.classList.contains('field-textarea'))) refreshNextBtn();
   });
 
+  // Certified/Registered ride First Class: Lob rejects Standard plus an extra
+  // service, and failing at review time after the whole wizard is hostile, so
+  // the class is forced and locked the moment an extra service is chosen.
+  function syncMailClassLock() {
+    const locked = !!$('opt-extra-service').value;
+    const mt = $('opt-mail-type');
+    if (locked) mt.value = 'usps_first_class';
+    mt.disabled = locked;
+  }
+  $('opt-extra-service').addEventListener('change', syncMailClassLock);
+
   $('btn-add-recipient').addEventListener('click', addRecipient);
   $('btn-back').addEventListener('click', () => { if (currentStep > 0) goToStep(currentStep - 1); });
   $('btn-next').addEventListener('click', () => {
@@ -1687,6 +1702,7 @@
     $('opt-color').checked = false; $('opt-double').checked = false; $('opt-return-envelope').checked = false;
     $('opt-mail-type').value = 'usps_first_class'; $('opt-extra-service').value = ''; $('opt-use-type').value = 'operational';
     $('opt-address-placement').value = 'top_first_page'; $('opt-perforated').value = ''; $('opt-send-date').value = ''; $('opt-description').value = '';
+    syncMailClassLock(); // values were reset programmatically (no change event), so re-derive the lock
     removeFile(); setMode('write'); hideError();
     goToStep(0);
   });
@@ -1695,6 +1711,7 @@
 
   // ═══ Init ═══
   updateHistoryCount();
+  syncMailClassLock(); // in case the browser restored a stale extra-service selection
   // Start with one empty recipient card
   recipients = [{ id: nextRecipientId++, name: '', company: '', line1: '', line2: '', city: '', state: '', zip: '' }];
   renderRecipients();
