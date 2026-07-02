@@ -10,6 +10,7 @@
 <style>
   :root {
     /* ════ Brand · deep navy foundation ════ */
+    --navy-950: #060d1d;    /* darkest chrome: header band */
     --navy-900: #0a1730;
     --navy-800: #0e2147;
     --navy-700: #143063;
@@ -29,13 +30,14 @@
 
     /* ════ Surfaces · cool neutrals ════ */
     --bg: #eef1f6;
-    --bg-grad: radial-gradient(1100px 640px at 50% -260px, #ffffff 0%, #eef1f6 56%, #e6ebf4 100%);
+    --bg-grad: radial-gradient(1100px 640px at 50% -260px, #ffffff 0%, #eef1f6 56%, #dfe6f1 100%);
     --surface: #ffffff;
     --surface-alt: #eef1f8;
     --surface-warm: #f4f7fc;
     --paper: #ffffff;
 
     /* ════ Ink + text · cool slate ════ */
+    --ink-950: #05070c;     /* near-black with a blue cast: gradient ends + display headings */
     --ink: #0c1c3a;
     --ink-soft: #1a2c52;
     --text: #28324a;
@@ -59,9 +61,13 @@
     --progress: #9c5d00;    /* amber-bronze */
     --progress-bg: #fdf2dd;
     --progress-border: rgba(156, 93, 0, 0.26);
-    --danger: #b3261e;      /* garnet */
-    --danger-bg: #fcecea;
-    --danger-border: rgba(179, 38, 30, 0.24);
+    --wax: #8c2318;         /* sealing wax: live mode + destructive/error (one hue, one job) */
+    --wax-bg: #f9eceb;
+    --wax-border: rgba(140, 35, 24, 0.28);
+    /* danger aliases the wax family so every error surface matches live-mode red */
+    --danger: var(--wax);
+    --danger-bg: var(--wax-bg);
+    --danger-border: var(--wax-border);
     --white: #ffffff;
 
     /* ════ Elevation · soft, cool shadows ════ */
@@ -71,7 +77,7 @@
     --shadow-lg: 0 6px 16px rgba(12,28,58,0.09), 0 28px 60px rgba(12,28,58,0.13);
 
     /* ════ Gradients ════ */
-    --brand-grad: linear-gradient(135deg, #1c3f7e 0%, #0e2147 56%, #0a1730 100%);
+    --brand-grad: linear-gradient(135deg, #1c3f7e 0%, #0e2147 56%, var(--ink-950) 100%);
     --cobalt-grad: linear-gradient(135deg, #4d8bff 0%, #2f6df0 100%);
 
     /* ════ Geometry ════ */
@@ -101,12 +107,10 @@
   .serif { font-family: 'Source Serif 4', Georgia, serif; }
   ::selection { background: rgba(47,109,240,0.18); }
 
-  /* ── Header ─────────────────────────────────────────── */
+  /* ── Header · dark chrome around calm paper surfaces ── */
   .header {
-    background: rgba(255,255,255,0.72);
-    backdrop-filter: saturate(180%) blur(14px);
-    -webkit-backdrop-filter: saturate(180%) blur(14px);
-    border-bottom: 1px solid var(--hairline);
+    background: linear-gradient(180deg, var(--navy-950) 0%, var(--navy-900) 100%);
+    border-bottom: 1px solid rgba(255,255,255,0.08);
     padding: 16px 36px;
     display: flex;
     align-items: center;
@@ -128,28 +132,32 @@
   .header-mark-wrap::after {
     content: ""; position: absolute; right: -3px; top: -3px;
     width: 9px; height: 9px; border-radius: 50%;
-    background: var(--accent); box-shadow: 0 0 0 2px var(--surface), 0 0 10px rgba(244,169,43,0.55);
+    background: var(--accent); box-shadow: 0 0 0 2px var(--navy-950), 0 0 10px rgba(244,169,43,0.55);
   }
   .header-mark { width: 19px; height: 19px; }
   .header-text { display: flex; flex-direction: column; line-height: 1.05; }
-  .header-title { font-family: 'Source Serif 4', Georgia, serif; font-weight: 600; font-size: 19px; color: var(--ink); letter-spacing: -0.015em; }
-  .header-tagline { font-size: 10.5px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-muted); margin-top: 3px; }
+  .header-title { font-family: 'Source Serif 4', Georgia, serif; font-weight: 600; font-size: 19px; color: #e8edf7; letter-spacing: -0.015em; }
+  .header-tagline { font-size: 10.5px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: rgba(232,237,247,0.55); margin-top: 3px; }
 
-  .header-nav { display: flex; gap: 2px; background: var(--surface-alt); padding: 3px; border-radius: 10px; border: 1px solid var(--border-soft); box-shadow: var(--shadow-xs); }
-  .nav-tab { padding: 7px 16px; border: none; background: transparent; font-size: 12.5px; font-weight: 500; font-family: 'Inter', sans-serif; color: var(--text-dim); border-radius: 7px; cursor: pointer; transition: all 0.18s ease; }
-  .nav-tab:hover { color: var(--ink); }
+  .header-nav { display: flex; gap: 2px; background: rgba(255,255,255,0.06); padding: 3px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.10); }
+  .nav-tab { padding: 7px 16px; border: none; background: transparent; font-size: 12.5px; font-weight: 500; font-family: 'Inter', sans-serif; color: rgba(232,237,247,0.6); border-radius: 7px; cursor: pointer; transition: all 0.18s ease; }
+  .nav-tab:hover { color: #ffffff; }
   .nav-tab.active { background: var(--surface); color: var(--cobalt-deep); box-shadow: var(--shadow-sm); }
-  .nav-tab .count { display: inline-block; margin-left: 6px; padding: 0 6px; background: var(--cobalt-tint); color: var(--cobalt-deep); border-radius: 9px; font-size: 10.5px; font-weight: 700; min-width: 18px; text-align: center; }
+  .nav-tab .count { display: inline-block; margin-left: 6px; padding: 0 6px; background: rgba(255,255,255,0.14); color: #e8edf7; border-radius: 9px; font-size: 10.5px; font-weight: 700; min-width: 18px; text-align: center; }
   .nav-tab.active .count { background: var(--cobalt); color: var(--white); }
+  /* Cobalt focus rings vanish against the navy band: dark chrome gets a light ring. */
+  .nav-tab:focus-visible, .sign-out:focus-visible { outline: 2px solid var(--cobalt-bright); outline-offset: 2px; }
 
   .header-meta { display: flex; align-items: center; gap: 18px; }
-  .env-badge { display: inline-flex; align-items: center; gap: 7px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-dim); padding: 5px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); }
-  .env-dot { width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 0 3px rgba(255,255,255,0.6); }
-  .env-dot.live { background: var(--success); box-shadow: 0 0 0 3px rgba(15,122,82,0.20); }
-  .env-dot.test { background: var(--text-muted); }
+  .env-badge { display: inline-flex; align-items: center; gap: 7px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(232,237,247,0.78); padding: 5px 11px; border: 1px solid rgba(255,255,255,0.16); border-radius: 999px; background: rgba(255,255,255,0.07); }
+  .env-dot { width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 0 3px rgba(255,255,255,0.10); }
+  /* Live wears the wax: real letters and real postage, so the badge cannot be missed. */
+  .env-badge.live { background: var(--wax-bg); border-color: var(--wax-border); color: var(--wax); }
+  .env-dot.live { background: var(--wax); box-shadow: 0 0 0 3px rgba(140,35,24,0.18); }
+  .env-dot.test { background: rgba(232,237,247,0.55); }
   .sign-out-form { display: inline; margin: 0; }
-  .sign-out { font-size: 12.5px; color: var(--text-dim); text-decoration: none; transition: color 0.15s; background: none; border: none; padding: 0; cursor: pointer; font-family: inherit; }
-  .sign-out:hover { color: var(--danger); }
+  .sign-out { font-size: 12.5px; color: rgba(232,237,247,0.6); text-decoration: none; transition: color 0.15s; background: none; border: none; padding: 0; cursor: pointer; font-family: inherit; }
+  .sign-out:hover { color: #e08a7f; }
 
   /* ── Main ──────────────────────────────────────────── */
   .main { max-width: 720px; margin: 0 auto; padding: 56px 28px 120px; }
@@ -177,7 +185,8 @@
   /* ── Steps (numbered indicator) ─────────────────────── */
   .steps { position: relative; margin-bottom: 64px; }
   .steps-track { position: absolute; top: 18px; left: 12.5%; right: 12.5%; height: 2px; background: var(--border); border-radius: 2px; }
-  .steps-fill { position: absolute; top: 0; left: 0; height: 100%; background: var(--cobalt-grad); border-radius: 2px; transition: width 0.5s cubic-bezier(.4,0,.2,1); }
+  /* Cobalt-to-gold: the track runs from "now" toward "done" (gold marks completion). */
+  .steps-fill { position: absolute; top: 0; left: 0; height: 100%; background: linear-gradient(90deg, var(--cobalt) 0%, var(--accent) 100%); border-radius: 2px; transition: width 0.5s cubic-bezier(.4,0,.2,1); }
   .steps-labels { display: flex; justify-content: space-between; align-items: flex-start; position: relative; counter-reset: step; }
   .step-label {
     display: flex; flex-direction: column; align-items: center; gap: 12px;
@@ -213,14 +222,18 @@
     transform: scale(1.04);
   }
   .step-label.done { color: var(--text-dim); }
+  /* Done markers: deep navy with a gold check. Gold = completed, cobalt = current. */
   .step-label.done::before {
-    background: var(--cobalt-grad); color: #fff; border-color: transparent;
+    background: var(--navy-800); color: var(--accent); border-color: transparent;
     content: "✓"; font-size: 15px;
     box-shadow: var(--shadow-sm);
   }
 
   /* ── Typography ────────────────────────────────────── */
-  .section-title { font-family: 'Source Serif 4', Georgia, serif; font-size: 33px; font-weight: 600; letter-spacing: -0.028em; color: var(--ink); margin-bottom: 10px; line-height: 1.12; }
+  .section-title { font-family: 'Source Serif 4', Georgia, serif; font-size: 33px; font-weight: 600; letter-spacing: -0.028em; color: var(--ink-950); margin-bottom: 10px; line-height: 1.12; }
+  /* Short gold rule above every page title: the engraved-stationery cue that
+     echoes the login card's top rule and ties the pages together. */
+  .section-title::before { content: ""; display: block; width: 28px; height: 3px; border-radius: 2px; background: var(--accent); margin-bottom: 10px; }
   .section-desc { color: var(--text-dim); font-size: 14.5px; margin-bottom: 40px; line-height: 1.6; max-width: 56ch; }
 
   /* ── Form ──────────────────────────────────────────── */
@@ -377,7 +390,7 @@
     padding: 28px 28px 18px;
     border: 1px solid var(--border);
     border-radius: var(--r-lg);
-    background: var(--surface-warm);
+    background: #f2f5fb; /* faint navy wash so the panel reads as a distinct instrument panel */
   }
   .options-panel-title { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.16em; color: var(--text-dim); margin-bottom: 22px; display: inline-flex; align-items: center; gap: 8px; }
   .options-panel-title::before { content: ""; width: 16px; height: 2px; border-radius: 2px; background: var(--accent); display: inline-block; }
@@ -409,6 +422,16 @@
     box-shadow: 0 1px 0 rgba(255,255,255,0.16) inset, 0 4px 10px rgba(12,28,58,0.24), 0 12px 26px rgba(31,80,201,0.26);
   }
   .btn-primary:active:not(:disabled) { transform: translateY(0); }
+  /* Live mode wears the wax: this button spends real postage, so it physically
+     changes color when money is at stake. Toggled by refreshNextBtn on the Review step. */
+  .btn-primary.live {
+    background: linear-gradient(135deg, #a12c1e 0%, #8c2318 55%, #6f1a12 100%);
+    color: #fff;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.12) inset, 0 2px 6px rgba(70,15,9,0.24), 0 6px 16px rgba(140,35,24,0.22);
+  }
+  .btn-primary.live:hover:not(:disabled) {
+    box-shadow: 0 1px 0 rgba(255,255,255,0.16) inset, 0 4px 10px rgba(70,15,9,0.30), 0 12px 26px rgba(140,35,24,0.34);
+  }
   .btn-secondary {
     background: var(--surface);
     color: var(--text-dim);
@@ -431,9 +454,10 @@
   .preview-label { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.14em; color: var(--text-muted); margin-bottom: 14px; margin-top: 24px; display: inline-flex; align-items: center; gap: 8px; }
   .preview-label::before { content: ""; width: 16px; height: 2px; border-radius: 2px; background: var(--accent); }
   .letter-preview {
-    background: var(--paper);
+    background: #fffefb; /* faintly warmed paper so the letter reads as stationery against the cool UI */
     color: #1a1f2e;
     border: 1px solid var(--border-strong);
+    border-top: 3px solid var(--gold-soft);
     border-radius: var(--r-md);
     padding: 56px 64px;
     font-family: 'Source Serif 4', Georgia, serif;
@@ -522,7 +546,7 @@
     position: relative;
     overflow: hidden;
   }
-  .letter-card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--cobalt-grad); opacity: 0; transition: opacity 0.18s; }
+  .letter-card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: linear-gradient(180deg, var(--cobalt) 0%, var(--accent) 100%); opacity: 0; transition: opacity 0.18s; }
   .letter-card:hover { border-color: var(--border-strong); box-shadow: var(--shadow-md); transform: translateY(-1px); }
   .letter-card:hover::before { opacity: 1; }
   .letter-card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; margin-bottom: 10px; }
@@ -610,7 +634,7 @@
       <button class="nav-tab" id="view-history-tab" type="button" role="tab" aria-selected="false" aria-controls="view-history" tabindex="-1">History <span class="count" id="history-count">0</span></button>
     </nav>
     <div class="header-meta">
-      <div class="env-badge"><span class="env-dot test" id="env-dot"></span><span id="env-label">Test</span></div>
+      <div class="env-badge" id="env-badge"><span class="env-dot test" id="env-dot"></span><span id="env-label">Test</span></div>
       <form method="POST" action="/logout" class="sign-out-form"><button type="submit" class="sign-out">Sign out</button></form>
     </div>
   </header>
@@ -1090,12 +1114,13 @@
   }
   function refreshNextBtn() {
     const btn = $('btn-next');
-    if (currentStep < 3) { btn.disabled = !canProceed(); btn.textContent = 'Continue →'; }
+    if (currentStep < 3) { btn.disabled = !canProceed(); btn.textContent = 'Continue →'; btn.classList.remove('live'); }
     else if (currentStep === 3) {
       btn.disabled = sending || !apiKey();
       const n = readAllRecipients().length;
       const label = n === 1 ? 'Letter' : (n + ' Letters');
       btn.textContent = sending ? 'Sending…' : (isLive() ? ('Mail ' + label + ' (Live)') : ('Mail ' + label + ' (Test)'));
+      btn.classList.toggle('live', isLive()); // Live mode wears the wax (styling class only)
     }
   }
   function goToStep(n) {
@@ -1656,6 +1681,7 @@
   $('api-key-input').addEventListener('input', function() {
     const l = isLive();
     $('env-dot').className = 'env-dot ' + (l ? 'live' : 'test');
+    $('env-badge').classList.toggle('live', l); // Live mode wears the wax (styling class only)
     $('env-label').textContent = l ? 'Live' : 'Test';
     historyLoadedKey = null;  // key changed — History reloads next time it opens
     if (currentView === 'history') {

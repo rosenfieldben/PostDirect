@@ -266,9 +266,9 @@ function loginPage(error) {
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,500;0,8..60,600;0,8..60,700&display=swap" rel="stylesheet">
 <style>
   :root {
-    /* Deep navy backdrop for a striking auth screen */
-    --bg: #0a1730;
-    --bg-grad: radial-gradient(1200px 720px at 50% -280px, #16315f 0%, #0e2147 44%, #0a1730 100%);
+    /* Deep navy backdrop falling to ink black (matches the app's ink-950) */
+    --bg: #05070c;
+    --bg-grad: radial-gradient(1200px 720px at 50% -280px, #16315f 0%, #0e2147 44%, #05070c 100%);
     --surface: #ffffff;
     --surface-warm: #f4f7fc;
     --ink: #0c1c3a;
@@ -284,11 +284,12 @@ function loginPage(error) {
     --accent: #f4a92b;
     --gold: #9a6a14;
     --success: #0f7a52;
-    --danger: #b3261e;
-    --danger-bg: #fcecea;
-    --danger-border: rgba(179,38,30,0.24);
+    /* danger is the wax family (matches the app's live/error red) */
+    --danger: #8c2318;
+    --danger-bg: #f9eceb;
+    --danger-border: rgba(140,35,24,0.28);
     --white: #ffffff;
-    --brand-grad: linear-gradient(135deg, #1c3f7e 0%, #0e2147 56%, #0a1730 100%);
+    --brand-grad: linear-gradient(135deg, #1c3f7e 0%, #0e2147 56%, #05070c 100%);
     --shadow-xs: 0 1px 2px rgba(12,28,58,0.06);
     --shadow-lg: 0 18px 50px rgba(4,10,26,0.45), 0 4px 14px rgba(4,10,26,0.30);
   }
