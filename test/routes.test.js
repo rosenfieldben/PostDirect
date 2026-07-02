@@ -7,6 +7,10 @@
 process.env.PD_SECRET = 'itest-secret-fixed-value';
 process.env.PD_USERNAME = 'itest-user';
 process.env.PD_PASSWORD = 'itest-pass';
+// Trust X-Forwarded-For so the lockout tests can present distinct client IPs,
+// isolating the per-username bucket from the per-IP one (all real connections
+// here share 127.0.0.1). Read once at module load, hence set before require.
+process.env.PD_TRUST_PROXY = '1';
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -89,6 +93,40 @@ test('oversized login body (> 16 KB) returns 413', async () => {
   const huge = 'username=' + 'a'.repeat(17 * 1024);
   const r = await request({ path: '/login', method: 'POST', headers: FORM }, huge);
   assert.strictEqual(r.status, 413);
+});
+
+test('lockout regression: correct credentials always log in, even with the username bucket full', async () => {
+  // Start from a clean slate: earlier tests recorded failures for this
+  // username, and a successful login clears both buckets.
+  const clean = await request({ path: '/login', method: 'POST', headers: FORM }, loginBody('itest-user', 'itest-pass'));
+  assert.strictEqual(clean.status, 302);
+
+  // Simulate a spray against the known username from 5 distinct forged IPs:
+  // this fills ONLY the username bucket. The first 4 wrong attempts get 401,
+  // the 5th trips the cap and gets 429.
+  for (let i = 1; i <= 5; i++) {
+    const r = await request(
+      { path: '/login', method: 'POST', headers: { ...FORM, 'X-Forwarded-For': '10.9.9.' + i } },
+      loginBody('itest-user', 'wrong-pass-' + i)
+    );
+    assert.strictEqual(r.status, i < 5 ? 401 : 429, 'attempt ' + i);
+  }
+
+  // The single most important assertion in this suite: the real owner with
+  // the correct password is NOT locked out by forged failures.
+  const ok = await request(
+    { path: '/login', method: 'POST', headers: { ...FORM, 'X-Forwarded-For': '10.9.10.1' } },
+    loginBody('itest-user', 'itest-pass')
+  );
+  assert.strictEqual(ok.status, 302);
+  assert.ok(String(ok.headers['set-cookie']).includes('pd_session='), 'session cookie issued');
+
+  // Success cleared both buckets: a fresh wrong attempt is 401, not 429.
+  const wrong = await request(
+    { path: '/login', method: 'POST', headers: { ...FORM, 'X-Forwarded-For': '10.9.10.1' } },
+    loginBody('itest-user', 'wrong-again')
+  );
+  assert.strictEqual(wrong.status, 401, 'buckets were cleared by the successful login');
 });
 
 test('traversal guard: nothing outside public/ is served', async () => {

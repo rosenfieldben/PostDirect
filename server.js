@@ -35,6 +35,8 @@ const PROXY_TIMEOUT_MS = 30 * 1000;          // 30 s — upstream Lob request ti
 // Login rate limiting (per-IP, in-memory)
 const LOGIN_MAX_ATTEMPTS = 5;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;      // 15 minutes
+const BUCKET_KEY_MAX = 256;                  // max chars of a username used as a bucket key
+const ATTEMPT_MAP_MAX = 10000;               // max distinct keys per bucket between sweeps
  
 // ══════════════════════════════════════════════════════════════
 // STATELESS SESSIONS — HMAC-signed cookies, no server-side store
@@ -160,6 +162,15 @@ function clientIp(req) {
   return req.socket.remoteAddress || 'unknown';
 }
 
+// Canonicalize a bucket key: trim and truncate. Applied to the username before
+// EVERY attemptBlocked / recordAttempt / clearAttempts call so all three see
+// the same key. The why: the login body allows up to 16 KB and the cleanup
+// sweep only runs every 15 minutes, so unbounded attacker-chosen keys are a
+// memory-growth vector between sweeps.
+function bucketKey(raw, maxLen) {
+  return String(raw == null ? '' : raw).trim().slice(0, maxLen);
+}
+
 function attemptBlocked(map, key) {
   const rec = map.get(key);
   if (!rec) return false;
@@ -170,6 +181,11 @@ function attemptBlocked(map, key) {
 function recordAttempt(map, key) {
   const rec = map.get(key);
   if (!rec || Date.now() - rec.first > LOGIN_WINDOW_MS) {
+    // Refuse to insert a NEW key once the map is at the cap (existing keys,
+    // including expired ones being reset, still update). The why: the per-IP
+    // bucket still throttles whoever is spraying, so degrading the username
+    // bucket under flood is the safe failure mode, versus unbounded memory.
+    if (!rec && map.size >= ATTEMPT_MAP_MAX) return;
     map.set(key, { count: 1, first: Date.now() });
   } else {
     rec.count += 1;
@@ -486,25 +502,36 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(429, { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': String(Math.ceil(LOGIN_WINDOW_MS / 1000)) });
       res.end(loginPage('Too many failed attempts. Please wait a few minutes and try again.'));
     };
+    // The per-IP check stays BEFORE the body read: cheap rejection of a
+    // blocked source before allocating anything for the body.
     if (attemptBlocked(ipAttempts, ip)) return tooMany();
     const body = await readBody(req, res, LOGIN_BODY_LIMIT);
     if (body === null) return; // 413/400 already sent
     const params = new URLSearchParams(body.toString());
     const user = params.get('username') || '';
     const pass = params.get('password') || '';
-    if (user && attemptBlocked(userAttempts, user)) return tooMany();
+    const userKey = bucketKey(user, BUCKET_KEY_MAX);
 
+    // Credentials are evaluated BEFORE the username bucket is consulted (both
+    // comparisons are constant-time, so the ordering leaks nothing). The why:
+    // the username bucket exists to throttle guessing, not to lock out the
+    // owner, so a correct password bypasses it entirely; otherwise 5 forged
+    // failures against the known username would deny the real user service.
     const userOk = safeEqual(user, USERNAME);
     const passOk = safeEqual(pass, PASSWORD);
     if (userOk && passOk) {
       clearAttempts(ipAttempts, ip);
-      clearAttempts(userAttempts, user);
+      clearAttempts(userAttempts, userKey);
       const token = createSession();
       setCookie(res, token, secure);
       return redirect(res, '/');
     }
+    // Wrong credentials: record in both buckets, then 429 once either is at
+    // the cap. Attacker-visible behavior is unchanged from the old ordering:
+    // wrong passwords still hit the limit.
     recordAttempt(ipAttempts, ip);
-    if (user) recordAttempt(userAttempts, user);
+    if (userKey) recordAttempt(userAttempts, userKey);
+    if (attemptBlocked(ipAttempts, ip) || (userKey && attemptBlocked(userAttempts, userKey))) return tooMany();
     return sendHTML(res, 401, loginPage('Invalid username or password'));
   }
  
@@ -604,6 +631,7 @@ module.exports = {
   validateSession,
   safeEqual,
   clientIp,
+  bucketKey,
   attemptBlocked,
   recordAttempt,
   clearAttempts,
