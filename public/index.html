@@ -864,6 +864,14 @@
   let recipients = [];  // array of { id, name, company, line1, line2, city, state, zip }
   let nextRecipientId = 1;
   let lastSendResults = null;  // array of { recipient, success, id?, error? }
+  // Per-recipient Lob Idempotency-Key values for the CURRENT compose session.
+  // Lifecycle is the whole point: if a send fails (or the network drops after
+  // Lob accepted it) and the user clicks Mail again, the SAME key is reused for
+  // that recipient, so Lob returns the original letter instead of printing a
+  // duplicate (Lob honors the key for 24 h). On a confirmed success the key is
+  // deleted, so a later intentional re-send to the same person is a new letter,
+  // not a replay. Do not "simplify" this into a fresh key per attempt.
+  const idempotencyKeys = new Map();  // recipient id -> uuid
   let history = [];                 // current render model (account-sourced)
   let optimistic = [];              // letters sent this session, shown until the Lob list catches up
   let historyEnv = null;            // 'live' | 'test' of the currently loaded list
@@ -1066,6 +1074,9 @@
   function removeRecipient(id) {
     if (recipients.length <= 1) return;
     recipients = readAllRecipients().filter(r => r.id !== id);
+    // The recipient set changed, so pending retry keys no longer describe the
+    // same send; drop them all rather than risk replaying a stale request.
+    idempotencyKeys.clear();
     renderRecipients();
   }
 
@@ -1260,6 +1271,15 @@
   }
 
   // ═══ Send (handles multiple recipients) ═══
+  // Pure helper (unit-tested by extraction): return the recipient's existing
+  // idempotency key, or mint and remember one. Reuse-on-retry is what makes an
+  // ambiguous network failure safe to re-send.
+  function getOrCreateIdempotencyKey(map, id, uuidFn) {
+    let key = map.get(id);
+    if (!key) { key = uuidFn(); map.set(id, key); }
+    return key;
+  }
+
   async function sendLetters() {
     if (!apiKey()) { showError('Please enter your Lob API key above.'); return; }
     const rs = readAllRecipients();
@@ -1277,14 +1297,19 @@
       setProgress('Sending letter ' + (i + 1) + ' of ' + rs.length + ' — ' + (to.name || 'recipient'), true);
       const allFields = recipientFields(to).concat(common);
       const { body: mpBody, contentType } = buildMultipart(allFields, payload.buffer, payload.name, payload.mime);
+      // Reused across retries within this compose session (see idempotencyKeys).
+      const idemKey = getOrCreateIdempotencyKey(idempotencyKeys, to.id, () => crypto.randomUUID());
       try {
         const resp = await fetch(LOB_BASE + '/v1/letters', {
           method: 'POST',
-          headers: { 'Authorization': 'Basic ' + btoa(apiKey() + ':'), 'Content-Type': contentType },
+          headers: { 'Authorization': 'Basic ' + btoa(apiKey() + ':'), 'Content-Type': contentType, 'Idempotency-Key': idemKey },
           body: mpBody
         });
         const data = await resp.json();
         if (data.error) throw new Error(data.error.message);
+        // Confirmed success: drop the key so a deliberate future send to this
+        // recipient creates a new letter instead of replaying this one.
+        idempotencyKeys.delete(to.id);
         results.push({ recipient: to, success: true, data });
         // Optimistic entry so a freshly sent letter shows immediately. It de-dupes
         // against the Lob list by id the next time History loads (Lob's object wins).
@@ -1655,6 +1680,8 @@
 
   $('btn-reset').addEventListener('click', () => {
     recipients = [{ id: nextRecipientId++, name: '', company: '', line1: '', line2: '', city: '', state: '', zip: '' }];
+    // New compose session: any retry keys from the previous one are void.
+    idempotencyKeys.clear();
     renderRecipients();
     $('letter-body').value = '';
     $('opt-color').checked = false; $('opt-double').checked = false; $('opt-return-envelope').checked = false;

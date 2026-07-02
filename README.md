@@ -115,6 +115,7 @@ sanitization, and the history status-derivation logic.
 - Every response carries hardening headers: a `Content-Security-Policy` (scripts/styles/connections locked to same-origin + Google Fonts, framing disabled), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer`
 - Frontend output is HTML-escaped including quotes (safe in attribute contexts), and the multipart builder sanitizes header fields (filename, field names) against CRLF/quote injection
 - Request bodies are size-capped (16 KB for login, 52 MB for the Lob proxy) to prevent memory-exhaustion
+- Every send carries a per-recipient Lob idempotency key that is reused on retry, so re-clicking Mail after a network failure cannot double-mail a letter
 - The Lob API key is entered in-browser and proxied server-side (never stored)
 - No data is logged or persisted on the server
 
