@@ -1,5 +1,7 @@
 # ✉ PostDirect — Web Edition
 
+[![CI](https://github.com/rosenfieldben/postdirect/actions/workflows/ci.yml/badge.svg)](https://github.com/rosenfieldben/postdirect/actions/workflows/ci.yml)
+
 Send physical USPS letters from any browser, secured with login authentication.
 
 ## Features
@@ -8,6 +10,7 @@ Send physical USPS letters from any browser, secured with login authentication.
 - **All Lob mailing options** — First Class, Certified, Registered, return envelopes, scheduling, and more
 - **Write or upload** — compose in-app or upload a PDF
 - **Zero dependencies** — runs on Node.js alone (no npm install needed)
+- **Server-side API key (optional)** — set `PD_LOB_KEY` and your Lob key never touches the browser
 - **Deploy anywhere** — Railway, Render, Fly.io, VPS, Docker, etc.
 
 ## Quick Deploy
@@ -20,6 +23,7 @@ Send physical USPS letters from any browser, secured with login authentication.
    - `PD_USERNAME` = your chosen username
    - `PD_PASSWORD` = your chosen password
    - `PD_SECRET` = any long random string
+   - `PD_LOB_KEY` = your Lob API key (optional — otherwise you paste it into the UI)
 4. Railway auto-detects Node.js and deploys. You'll get a public URL like `postdirect-xxxx.up.railway.app`
 
 ### Option 2: Render (free tier available)
@@ -99,6 +103,7 @@ sanitization, and the history status-derivation logic.
 | `PD_USERNAME`        | Yes      | `admin`    | Login username                                                                                        |
 | `PD_PASSWORD`        | Yes      | `changeme` | Login password                                                                                        |
 | `PD_SECRET`          | Rec.     | (random)   | Secret key used to **sign** session cookies (HMAC-SHA256, nothing is encrypted). Must be a stable random string, or sessions are invalidated on every restart. The server warns at startup if it is shorter than 32 characters. |
+| `PD_LOB_KEY`         | No       | —          | Lob API key held server-side. When set, the proxy injects it into Lob requests that don't carry their own key, so the key never reaches the browser. A key pasted into the UI still overrides it. The UI shows Test/Live based on the key's `test_`/`live_` prefix. |
 | `PD_SECURE_COOKIES`  | No       | (auto)     | `1`/`0` to force the cookie `Secure` flag on/off. Default auto-detects HTTPS via `X-Forwarded-Proto`. |
 | `PD_TRUST_PROXY`     | No       | `0`        | `1`/`true` to derive the client IP for login rate-limiting from the leftmost `X-Forwarded-For` entry. **Enable ONLY behind a trusted reverse proxy** (Railway/Render/nginx); otherwise clients can spoof `X-Forwarded-For` to evade the per-IP limit. |
 | `NODE_ENV`           | No       | —          | When set to `production`, the server **refuses to start** if `PD_PASSWORD` is unset (no silent `changeme` fallback). The Docker image sets this automatically. |
@@ -116,7 +121,7 @@ sanitization, and the history status-derivation logic.
 - Frontend output is HTML-escaped including quotes (safe in attribute contexts), and the multipart builder sanitizes header fields (filename, field names) against CRLF/quote injection
 - Request bodies are size-capped (16 KB for login, 52 MB for the Lob proxy) to prevent memory-exhaustion
 - Every send carries a per-recipient Lob idempotency key that is reused on retry, so re-clicking Mail after a network failure cannot double-mail a letter
-- The Lob API key is entered in-browser and proxied server-side (never stored)
+- The Lob API key is either held server-side (`PD_LOB_KEY` — the key is injected by the proxy and never sent to the browser; `/api/config` only reports that a key exists and whether it is test or live) or entered in-browser per session and proxied server-side (never stored)
 - No data is logged or persisted on the server
 
 ## Files
@@ -126,6 +131,10 @@ PostDirect/
 ├── server.js         # Auth + proxy server (zero dependencies)
 ├── package.json      # Node.js manifest
 ├── Dockerfile        # Docker deployment (non-root user + healthcheck)
+├── LICENSE           # MIT
+├── .github/
+│   └── workflows/
+│       └── ci.yml    # GitHub Actions: npm test on Node 18/20/22
 ├── public/
 │   └── index.html    # The PostDirect app
 ├── test/             # node:test unit tests (no deps) — run with `npm test`

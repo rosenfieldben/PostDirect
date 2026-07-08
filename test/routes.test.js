@@ -89,6 +89,18 @@ test('proxy auth gate: unauthenticated /api/lob/* redirects to /login (never rea
   assert.strictEqual(r.headers.location, '/login');
 });
 
+test('/api/config: behind the auth gate; reports no server key when PD_LOB_KEY is unset', async () => {
+  const anon = await request({ path: '/api/config', method: 'GET' });
+  assert.strictEqual(anon.status, 302);
+  assert.strictEqual(anon.headers.location, '/login');
+
+  const login = await request({ path: '/login', method: 'POST', headers: FORM }, loginBody('itest-user', 'itest-pass'));
+  const cookie = String(login.headers['set-cookie']).split(';')[0];
+  const r = await request({ path: '/api/config', method: 'GET', headers: { Cookie: cookie } });
+  assert.strictEqual(r.status, 200);
+  assert.deepStrictEqual(JSON.parse(r.body), { server_key: false, env: null });
+});
+
 test('oversized login body (> 16 KB) returns 413', async () => {
   const huge = 'username=' + 'a'.repeat(17 * 1024);
   const r = await request({ path: '/login', method: 'POST', headers: FORM }, huge);
