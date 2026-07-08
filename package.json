@@ -3,6 +3,12 @@
   "version": "1.0.0",
   "description": "Send physical USPS mail from your browser via Lob API",
   "main": "server.js",
+  "license": "MIT",
+  "author": "Ben Rosenfield",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rosenfieldben/postdirect.git"
+  },
   "scripts": {
     "start": "node server.js",
     "test": "node --test"

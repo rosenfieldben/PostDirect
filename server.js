@@ -27,6 +27,16 @@ if (require.main === module && process.env.NODE_ENV === 'production' && (!proces
   process.exit(1);
 }
 
+// Optional server-side Lob API key. When set, the browser never needs to see
+// the key: the proxy injects it into any upstream request that doesn't carry
+// its own Authorization header. A key pasted into the UI still wins, so
+// switching to a different test/live key doesn't require a redeploy.
+const LOB_KEY = (process.env.PD_LOB_KEY || '').trim();
+// Lob keys are 'test_…' or 'live_…'. Anything unrecognized is reported as
+// 'live' so the UI errs toward the scary red live-mode treatment — showing
+// "Test" for a key that actually spends postage is the failure mode to avoid.
+const LOB_KEY_ENV = !LOB_KEY ? null : (LOB_KEY.startsWith('test_') ? 'test' : 'live');
+
 // Request body size limits (bytes)
 const LOGIN_BODY_LIMIT = 16 * 1024;          // 16 KB — the login form is tiny
 const PROXY_BODY_LIMIT = 52 * 1024 * 1024;   // 52 MB — headroom over the 50 MB PDF cap + multipart overhead
@@ -128,6 +138,15 @@ function readBody(req, res, maxBytes) {
       done(null);
     });
   });
+}
+
+// Authorization header the proxy sends upstream to Lob: the client's own
+// header when present (a key pasted into the UI overrides the server key),
+// else Basic auth minted from PD_LOB_KEY, else nothing (Lob replies 401).
+function lobAuthorization(clientAuth) {
+  if (clientAuth) return clientAuth;
+  if (LOB_KEY) return 'Basic ' + Buffer.from(LOB_KEY + ':').toString('base64');
+  return undefined;
 }
 
 // Constant-time credential comparison (hash first so unequal lengths
@@ -553,6 +572,13 @@ const server = http.createServer(async (req, res) => {
     return redirect(res, '/login');
   }
  
+  // ── Frontend config (authenticated) ──
+  if (pathname === '/api/config' && req.method === 'GET') {
+    // server_key tells the UI a PD_LOB_KEY is configured; env is its
+    // test/live mode. The key itself is never sent to the browser.
+    return sendJSON(res, 200, { server_key: !!LOB_KEY, env: LOB_KEY_ENV });
+  }
+
   // ── Lob API proxy ──
   if (pathname.startsWith('/api/lob/')) {
     const lobPath = pathname.replace('/api/lob', '') + url.search;
@@ -575,6 +601,10 @@ const server = http.createServer(async (req, res) => {
     // headers can desynchronize them from the actual bytes written.
     delete options.headers['transfer-encoding'];
     delete options.headers['content-length'];
+    // Inject the server-side Lob key (PD_LOB_KEY) unless the client sent its
+    // own Authorization header — see lobAuthorization for the precedence.
+    const lobAuth = lobAuthorization(options.headers['authorization']);
+    if (lobAuth) options.headers['authorization'] = lobAuth;
  
     const proxy = https.request(options, (lobRes) => {
       res.writeHead(lobRes.statusCode, {
@@ -618,7 +648,14 @@ if (require.main === module) {
     console.log(`     URL:      http://localhost:${PORT}`);
     console.log(`     Username: ${USERNAME}`);
     console.log(`     Password: ${'*'.repeat(PASSWORD.length)}`);
+    if (LOB_KEY) console.log(`     Lob key:  server-configured (${LOB_KEY_ENV})`);
     console.log('');
+    if (LOB_KEY && !/^(test|live)_/.test(LOB_KEY)) {
+      console.log('  WARNING: PD_LOB_KEY does not look like a Lob API key (expected');
+      console.log('     it to start with test_ or live_). It will be treated as LIVE.');
+      console.log('     Double-check the value.');
+      console.log('');
+    }
     if (PASSWORD === 'changeme') {
       console.log('  WARNING: Using default password!');
       console.log('     Set PD_USERNAME and PD_PASSWORD environment variables.');
@@ -654,6 +691,7 @@ module.exports = {
   createSession,
   validateSession,
   safeEqual,
+  lobAuthorization,
   clientIp,
   bucketKey,
   attemptBlocked,

@@ -911,15 +911,27 @@
   // text content and double/single-quoted attribute contexts (data-*, value, href).
   const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   const esc = s => (s == null ? '' : String(s)).replace(/[&<>"']/g, c => ESC_MAP[c]);
-  const isLive = () => $('api-key-input').value.startsWith('live_');
+  // ═══ API key resolution ═══
+  // The key can come from two places: pasted into the UI, or held server-side
+  // (PD_LOB_KEY, discovered via GET /api/config at init). A pasted key always
+  // overrides the server key; with a server key and an empty input, requests
+  // omit Authorization and the proxy injects the key — it never reaches the
+  // browser.
+  let serverKey = false, serverKeyEnv = null;   // set from /api/config
   const apiKey = () => $('api-key-input').value.trim();
+  const usingServerKey = () => serverKey && !apiKey();
+  const hasKey = () => usingServerKey() || !!apiKey();
+  const isLive = () => usingServerKey() ? serverKeyEnv === 'live' : $('api-key-input').value.startsWith('live_');
+  // Identity of the key History was last loaded with; the sentinel keeps the
+  // server key distinguishable from any pasteable string.
+  const keyIdentity = () => usingServerKey() ? ' server-key' : apiKey();
 
   // ═══ History engine (sourced from the Lob account via List Letters) ═══
   function updateHistoryCount() {
     $('history-count').textContent = history.length;
   }
   function authHeaders() {
-    return { 'Authorization': 'Basic ' + btoa(apiKey() + ':') };
+    return usingServerKey() ? {} : { 'Authorization': 'Basic ' + btoa(apiKey() + ':') };
   }
   function isTrackedService(es) { return TRACKED_SERVICES.indexOf(es) !== -1; }
   function uspsTrackingUrl(num) {
@@ -964,8 +976,7 @@
   async function loadAccountHistory(opts) {
     opts = opts || {};
     const reset = opts.reset !== false;
-    const key = apiKey();
-    if (!key) {
+    if (!hasKey()) {
       history = []; historyEnv = null; historyNextUrl = null; historyLoadedKey = null; historyError = null;
       updateHistoryCount(); renderHistory(); return;
     }
@@ -998,7 +1009,7 @@
       }
       historyNextUrl = url;            // null when fully paged; otherwise the cursor for "Load older"
       historyEnv = env;
-      historyLoadedKey = key;
+      historyLoadedKey = keyIdentity();
       const opt = optimistic.filter(o => o.mode === env && !seen[o.id]);  // keep just-sent letters not yet in the list
       history = opt.concat(collected);
     } catch (e) {
@@ -1116,7 +1127,7 @@
     const btn = $('btn-next');
     if (currentStep < 3) { btn.disabled = !canProceed(); btn.textContent = 'Continue →'; btn.classList.remove('live'); }
     else if (currentStep === 3) {
-      btn.disabled = sending || !apiKey();
+      btn.disabled = sending || !hasKey();
       const n = readAllRecipients().length;
       const label = n === 1 ? 'Letter' : (n + ' Letters');
       btn.textContent = sending ? 'Sending…' : (isLive() ? ('Mail ' + label + ' (Live)') : ('Mail ' + label + ' (Test)'));
@@ -1310,7 +1321,7 @@
   }
 
   async function sendLetters() {
-    if (!apiKey()) { showError('Please enter your Lob API key above.'); return; }
+    if (!hasKey()) { showError('Please enter your Lob API key above.'); return; }
     const rs = readAllRecipients();
     if (rs.length === 0) { showError('Add at least one recipient.'); return; }
     const payload = buildLetterPayload();
@@ -1331,7 +1342,7 @@
       try {
         const resp = await fetch(LOB_BASE + '/v1/letters', {
           method: 'POST',
-          headers: { 'Authorization': 'Basic ' + btoa(apiKey() + ':'), 'Content-Type': contentType, 'Idempotency-Key': idemKey },
+          headers: Object.assign({ 'Content-Type': contentType, 'Idempotency-Key': idemKey }, authHeaders()),
           body: mpBody
         });
         const data = await resp.json();
@@ -1481,7 +1492,7 @@
       if (historyLoading) {
         emptyTitle.textContent = 'Loading…';
         emptyDesc.textContent = 'Fetching your mail from Lob.';
-      } else if (!apiKey()) {
+      } else if (!hasKey()) {
         emptyTitle.textContent = 'API key required';
         emptyDesc.textContent = 'Enter your Lob API key above to load your mail history.';
       } else if (historyError) {
@@ -1600,7 +1611,7 @@
     try {
       const resp = await fetch(LOB_BASE + '/v1/letters/' + encodeURIComponent(h.id), {
         method: 'GET',
-        headers: { 'Authorization': 'Basic ' + btoa(apiKey() + ':') }
+        headers: authHeaders()
       });
       const data = await resp.json();
       if (data.error) { h.fetch_error = data.error.message || 'API error'; h.last_refreshed = new Date().toISOString(); return; }
@@ -1619,7 +1630,7 @@
   }
 
   async function refreshOne(id) {
-    if (!apiKey()) { alert('Enter your Lob API key at the top of the page to refresh status.'); return; }
+    if (!hasKey()) { alert('Enter your Lob API key at the top of the page to refresh status.'); return; }
     const h = history.find(x => x.id === id);
     if (!h) return;
     const btn = document.querySelector('[data-refresh="' + id + '"]');
@@ -1629,7 +1640,7 @@
   }
 
   async function refreshAll() {
-    if (!apiKey()) { alert('Enter your Lob API key at the top of the page to load your mail history.'); return; }
+    if (!hasKey()) { alert('Enter your Lob API key at the top of the page to load your mail history.'); return; }
     // Reloading the account list IS the tracking refresh: each letter returns its
     // current tracking_number and tracking_events.
     await loadAccountHistory({ reset: true });
@@ -1649,7 +1660,7 @@
     $('view-compose-tab').tabIndex = composeActive ? 0 : -1;
     $('view-history-tab').tabIndex = composeActive ? -1 : 0;
     if (name === 'history') {
-      if (apiKey() && historyLoadedKey !== apiKey()) loadAccountHistory({ reset: true });
+      if (hasKey() && historyLoadedKey !== keyIdentity()) loadAccountHistory({ reset: true });
       else renderHistory();
     }
   }
@@ -1678,15 +1689,20 @@
     });
   })();
 
-  $('api-key-input').addEventListener('input', function() {
+  function updateEnvBadge() {
     const l = isLive();
     $('env-dot').className = 'env-dot ' + (l ? 'live' : 'test');
     $('env-badge').classList.toggle('live', l); // Live mode wears the wax (styling class only)
     $('env-label').textContent = l ? 'Live' : 'Test';
+  }
+  $('api-key-input').addEventListener('input', function() {
+    updateEnvBadge();
     historyLoadedKey = null;  // key changed — History reloads next time it opens
     if (currentView === 'history') {
       clearTimeout(keyDebounce);
-      if (apiKey()) keyDebounce = setTimeout(() => loadAccountHistory({ reset: true }), 600);
+      // hasKey, not apiKey: clearing a pasted override falls back to the
+      // server key (reload), not to the "enter your key" empty state.
+      if (hasKey()) keyDebounce = setTimeout(() => loadAccountHistory({ reset: true }), 600);
       else renderHistory();   // cleared key -> show the "enter your key" empty state
     }
     if (currentStep === 3) refreshNextBtn();
@@ -1736,6 +1752,20 @@
   $('btn-refresh-all').addEventListener('click', refreshAll);
 
   // ═══ Init ═══
+  // Learn whether the server holds a Lob key (PD_LOB_KEY) and its test/live
+  // mode. Async by nature; until it resolves the UI behaves exactly as before
+  // (paste-in only), so nothing downstream waits on it.
+  fetch('/api/config').then(r => r.json()).then(cfg => {
+    serverKey = !!(cfg && cfg.server_key);
+    serverKeyEnv = (cfg && cfg.env) || null;
+    if (!serverKey) return;
+    $('api-key-input').placeholder = 'Server key configured (' + serverKeyEnv + ') — paste a key to override';
+    updateEnvBadge();
+    refreshNextBtn();
+    // If History was opened before this resolved, it showed "API key required";
+    // now that a key exists, load it.
+    if (currentView === 'history' && historyLoadedKey !== keyIdentity()) loadAccountHistory({ reset: true });
+  }).catch(() => { /* config unavailable — paste-in only, as before */ });
   updateHistoryCount();
   syncMailClassLock(); // in case the browser restored a stale extra-service selection
   // Start with one empty recipient card
