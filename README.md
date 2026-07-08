@@ -9,6 +9,7 @@ Send physical USPS letters from any browser, secured with login authentication.
 - **Password-protected** — only you can access it
 - **All Lob mailing options** — First Class, Certified, Registered, return envelopes, scheduling, and more
 - **Write or upload** — compose in-app or upload a PDF
+- **Address verification** — every recipient is checked against USPS (Lob US Verifications) on the Review step, with one-click corrections; undeliverable addresses require an explicit acknowledgment before mailing
 - **Zero dependencies** — runs on Node.js alone (no npm install needed)
 - **Server-side API key (optional)** — set `PD_LOB_KEY` and your Lob key never touches the browser
 - **Deploy anywhere** — Railway, Render, Fly.io, VPS, Docker, etc.
@@ -94,7 +95,8 @@ npm test     # = node --test
 
 Covers session signing/validation (including tampered, malformed, and expired
 tokens), constant-time credential comparison, the multipart builder's header
-sanitization, and the history status-derivation logic.
+sanitization, the history status-derivation logic, and the address-verification
+verdict/correction logic.
 
 ## Environment Variables
 

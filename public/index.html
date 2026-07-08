@@ -488,6 +488,18 @@
 
   .error-box { margin-top: 20px; padding: 12px 16px; border-radius: var(--r-sm); background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger); font-size: 13.5px; }
 
+  /* ── Address verification (Review step) ───────────── */
+  .verify-line { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--border-soft); display: flex; flex-direction: column; gap: 8px; }
+  .verify-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .verify-spinner { width: 12px; height: 12px; border: 2px solid var(--cobalt-tint); border-top-color: var(--cobalt); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
+  .verify-note { font-size: 11.5px; color: var(--text-muted); line-height: 1.5; }
+  .verify-suggest { background: var(--surface-warm); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 10px 12px; font-size: 12.5px; color: var(--text); line-height: 1.55; display: flex; justify-content: space-between; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .verify-suggest strong { color: var(--ink); font-weight: 600; }
+  /* The undeliverable acknowledgment wears the wax: checking it spends real
+     postage on an address USPS says it can't deliver to. */
+  .verify-ack { margin-top: 16px; padding: 12px 16px; border-radius: var(--r-sm); background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger); font-size: 13px; display: flex; gap: 9px; align-items: flex-start; cursor: pointer; line-height: 1.5; }
+  .verify-ack input { accent-color: var(--wax); width: 15px; height: 15px; margin-top: 2px; cursor: pointer; flex-shrink: 0; }
+
   .send-progress { margin-top: 20px; padding: 14px 18px; border: 1px solid var(--border); background: var(--surface); border-radius: var(--r-sm); font-size: 13px; color: var(--text-dim); display: flex; align-items: center; gap: 12px; box-shadow: var(--shadow-xs); }
   .send-progress-spinner { width: 16px; height: 16px; border: 2px solid var(--cobalt-tint); border-top-color: var(--cobalt); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -809,6 +821,10 @@
         </div>
         <div class="addr-card-label" style="margin-bottom:10px">Recipients <span id="review-to-count" style="font-weight:500;color:var(--text-dim)"></span></div>
         <div class="review-recipients" id="review-recipients"></div>
+        <label class="verify-ack is-hidden" id="verify-ack-wrap">
+          <input type="checkbox" id="verify-ack" />
+          <span>One or more addresses are undeliverable according to USPS. Mail them anyway — I understand the postage may be wasted.</span>
+        </label>
         <div class="preview-label">Letter Preview</div>
         <div class="letter-preview" id="review-body"></div>
         <div class="meta-row" id="review-meta"></div>
@@ -904,6 +920,16 @@
   let historyLoading = false;
   let historyError = null;
   let keyDebounce = null;           // debounce auto-load when the key changes on the History view
+  // ── Address verification (Review step) ──
+  // verifyResults holds the verdict per recipient for the CURRENT review render;
+  // verifyRun is a token that invalidates in-flight checks when the review
+  // re-renders (back + edit + forward), so stale responses can't paint over a
+  // newer render. verifyCache memoizes by normalized address so hopping between
+  // steps doesn't re-bill verification lookups for unchanged addresses.
+  let verifyResults = new Map();    // recipient id -> verdict (see verificationVerdict)
+  let verifyRun = 0;
+  let verifyDebounce = null;        // debounce re-verification when the key changes on Review
+  const verifyCache = new Map();    // env + normalized address -> verdict
 
   const $ = id => document.getElementById(id);
   const v = id => $(id).value.trim();
@@ -1039,6 +1065,155 @@
     } catch (e) { /* clipboard unavailable; no-op */ }
   }
 
+  // ═══ Address verification (Lob US Verifications) ═══
+  // Map a Lob POST /v1/us_verifications response onto a UI verdict.
+  // Levels: ok (deliverable) · warn (deliverable, unit issues) · blocked
+  // (undeliverable — requires explicit acknowledgment to send) · error
+  // (verification itself failed — fail OPEN, never blocking the send, since a
+  // missing verification entitlement or a Lob hiccup shouldn't brick mailing).
+  function verificationVerdict(data) {
+    if (!data || data.error) {
+      return { level: 'error', label: 'Couldn’t verify', note: (data && data.error && data.error.message) || 'Verification unavailable — you can still send.' };
+    }
+    switch (data.deliverability) {
+      case 'deliverable':
+        return { level: 'ok', label: 'Deliverable', note: '' };
+      case 'deliverable_unnecessary_unit':
+        return { level: 'warn', label: 'Deliverable · unit unnecessary', note: 'USPS says this address doesn’t need the unit/suite you provided.' };
+      case 'deliverable_incorrect_unit':
+        return { level: 'warn', label: 'Deliverable · unit looks wrong', note: 'The building exists but the unit/suite doesn’t match USPS records.' };
+      case 'deliverable_missing_unit':
+        return { level: 'warn', label: 'Deliverable · unit missing', note: 'This building needs a unit/suite number for reliable delivery.' };
+      case 'undeliverable':
+        return { level: 'blocked', label: 'Undeliverable', note: 'USPS has no deliverable match for this address.' };
+      default:
+        return { level: 'error', label: 'Couldn’t verify', note: 'Unrecognized verification result — you can still send.' };
+    }
+  }
+
+  // USPS-standardized address from a verification response, plus whether it
+  // differs from what was typed. Case and whitespace are ignored in the
+  // comparison: USPS standardization is all-caps, and a pure case change
+  // isn't worth a correction prompt.
+  function correctedAddress(typed, data) {
+    const comp = (data && data.components) || {};
+    const corrected = {
+      line1: (data && data.primary_line) || '',
+      line2: (data && data.secondary_line) || '',
+      city: comp.city || '',
+      state: comp.state || '',
+      zip: comp.zip_code || '',
+    };
+    const norm = s => String(s == null ? '' : s).toUpperCase().replace(/\s+/g, ' ').trim();
+    const differs = ['line1', 'line2', 'city', 'state', 'zip'].some(k => norm(corrected[k]) !== norm(typed[k]));
+    return { corrected, differs };
+  }
+
+  function verifyCacheKey(r) {
+    // Prefixed with the key environment: test keys return fixture data, so a
+    // verdict cached under a test key must not be reused once a live key is in.
+    return (isLive() ? 'L' : 'T') + '|' + [r.line1, r.line2, r.city, r.state, r.zip].map(s => String(s == null ? '' : s).toUpperCase().replace(/\s+/g, ' ').trim()).join('|');
+  }
+
+  async function verifyOne(r) {
+    const ck = verifyCacheKey(r);
+    if (verifyCache.has(ck)) return verifyCache.get(ck);
+    let result;
+    try {
+      const resp = await fetch(LOB_BASE + '/v1/us_verifications', {
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+        body: JSON.stringify({ primary_line: r.line1, secondary_line: r.line2 || '', city: r.city, state: r.state, zip_code: r.zip }),
+      });
+      const data = await resp.json();
+      const verdict = verificationVerdict(data);
+      const cor = verdict.level === 'error' ? { corrected: null, differs: false } : correctedAddress(r, data);
+      result = { level: verdict.level, label: verdict.label, note: verdict.note, corrected: cor.corrected, differs: cor.differs };
+    } catch (e) {
+      result = { level: 'error', label: 'Couldn’t verify', note: e.message || 'Network error — you can still send.', corrected: null, differs: false };
+    }
+    // Transient failures are not cached so a retry (re-entering Review) re-checks.
+    if (result.level !== 'error') verifyCache.set(ck, result);
+    return result;
+  }
+
+  // Send gate derived from the current verdicts. pending only counts when a
+  // key exists (without one, verification can't run and the send button is
+  // already disabled for the missing key — don't double-block).
+  function verificationGate() {
+    const rs = readAllRecipients();
+    let pending = false, blocked = false;
+    for (const r of rs) {
+      const v = verifyResults.get(r.id);
+      if (!v) pending = true;
+      else if (v.level === 'blocked') blocked = true;
+    }
+    return { pending: pending && hasKey(), blocked };
+  }
+
+  function renderVerifyLine(id, result) {
+    const el = document.getElementById('verify-r-' + id);
+    if (!el) return;
+    if (!result) {
+      el.innerHTML = '<div class="verify-row"><span class="verify-spinner"></span><span class="verify-note">Verifying with USPS…</span></div>';
+      return;
+    }
+    const variant = result.level === 'ok' ? 'success' : result.level === 'warn' ? 'progress' : result.level === 'blocked' ? 'error' : 'muted';
+    let html = '<div class="verify-row"><span class="status-badge ' + variant + '">' + esc(result.label) + '</span></div>';
+    if (result.note) html += '<div class="verify-note">' + esc(result.note) + '</div>';
+    // Offer the standardized form only for sendable verdicts: for an
+    // undeliverable address a "correction" to the same bad address is noise.
+    if ((result.level === 'ok' || result.level === 'warn') && result.differs && result.corrected) {
+      const c = result.corrected;
+      const line = [c.line1, c.line2, [c.city, c.state].filter(Boolean).join(', ') + ' ' + c.zip].filter(Boolean).join(', ');
+      html += '<div class="verify-suggest"><span>USPS standard: <strong>' + esc(line) + '</strong></span>' +
+        '<button class="btn-mini" type="button" data-usecorrected="' + esc(id) + '">Use corrected</button></div>';
+    }
+    el.innerHTML = html;
+    const btn = el.querySelector('[data-usecorrected]');
+    if (btn) btn.addEventListener('click', () => applyCorrectedAddress(id));
+  }
+
+  function applyCorrectedAddress(id) {
+    const v = verifyResults.get(id);
+    if (!v || !v.corrected) return;
+    // The step-1 inputs are the source of truth (readAllRecipients reads the
+    // DOM), so write the correction into them; they exist even while hidden.
+    const set = (key, val) => { const el = document.getElementById('r-' + id + '-' + key); if (el) el.value = val; };
+    set('line1', v.corrected.line1); set('line2', v.corrected.line2);
+    set('city', v.corrected.city); set('state', v.corrected.state); set('zip', v.corrected.zip);
+    populateReview(); // re-render + re-verify; the standardized form hits the cache path cheaply
+  }
+
+  function updateVerifyAck() {
+    const gate = verificationGate();
+    $('verify-ack-wrap').classList.toggle('is-hidden', !gate.blocked);
+    if (!gate.blocked) $('verify-ack').checked = false;
+  }
+
+  async function runReviewVerification(rs) {
+    const run = ++verifyRun;
+    verifyResults = new Map();
+    updateVerifyAck();
+    if (!hasKey()) {
+      // No key, no verification. The send button is already disabled for the
+      // missing key; show why the check didn't run instead of a stuck spinner.
+      rs.forEach(r => renderVerifyLine(r.id, { level: 'error', label: 'Couldn’t verify', note: 'Enter an API key to verify addresses.', corrected: null, differs: false }));
+      return;
+    }
+    rs.forEach(r => renderVerifyLine(r.id, null)); // pending spinners
+    refreshNextBtn();
+    await Promise.all(rs.map(async (r) => {
+      const result = await verifyOne(r);
+      if (run !== verifyRun) return; // review re-rendered since; drop stale paint
+      verifyResults.set(r.id, result);
+      renderVerifyLine(r.id, result);
+    }));
+    if (run !== verifyRun) return;
+    updateVerifyAck();
+    refreshNextBtn();
+  }
+
   // ═══ Sender / Recipients data ═══
   function getFrom() {
     return { name: v('from-name'), company: v('from-company'), line1: v('from-line1'), line2: v('from-line2'), city: v('from-city'), state: v('from-state'), zip: v('from-zip') };
@@ -1127,10 +1302,13 @@
     const btn = $('btn-next');
     if (currentStep < 3) { btn.disabled = !canProceed(); btn.textContent = 'Continue →'; btn.classList.remove('live'); }
     else if (currentStep === 3) {
-      btn.disabled = sending || !hasKey();
+      const gate = verificationGate();
+      btn.disabled = sending || !hasKey() || gate.pending || (gate.blocked && !$('verify-ack').checked);
       const n = readAllRecipients().length;
       const label = n === 1 ? 'Letter' : (n + ' Letters');
-      btn.textContent = sending ? 'Sending…' : (isLive() ? ('Mail ' + label + ' (Live)') : ('Mail ' + label + ' (Test)'));
+      btn.textContent = sending ? 'Sending…'
+        : gate.pending ? 'Verifying addresses…'
+        : (isLive() ? ('Mail ' + label + ' (Live)') : ('Mail ' + label + ' (Test)'));
       btn.classList.toggle('live', isLive()); // Live mode wears the wax (styling class only)
     }
   }
@@ -1170,8 +1348,10 @@
       '<div class="addr-card">' +
         '<div class="addr-card-label"><span>To</span>' + (rs.length > 1 ? '<span class="recipient-idx">#' + (i + 1) + '</span>' : '') + '</div>' +
         '<div class="addr-card-body">' + formatAddrInline(r) + '</div>' +
+        '<div class="verify-line" id="verify-r-' + esc(r.id) + '"></div>' +
       '</div>'
     ).join('');
+    runReviewVerification(rs);
 
     if (contentMode === 'write') {
       const b = v('letter-body');
@@ -1324,6 +1504,11 @@
     if (!hasKey()) { showError('Please enter your Lob API key above.'); return; }
     const rs = readAllRecipients();
     if (rs.length === 0) { showError('Add at least one recipient.'); return; }
+    // Belt to the button's suspenders: the send button is disabled while these
+    // hold, but re-check here so a stale enabled state can't slip a send through.
+    const gate = verificationGate();
+    if (gate.pending) { showError('Address verification is still running — one moment.'); return; }
+    if (gate.blocked && !$('verify-ack').checked) { showError('One or more addresses are undeliverable. Correct them, or check the acknowledgment above to mail anyway.'); return; }
     const payload = buildLetterPayload();
     if (!payload) { showError('Letter content is missing.'); return; }
 
@@ -1705,7 +1890,14 @@
       if (hasKey()) keyDebounce = setTimeout(() => loadAccountHistory({ reset: true }), 600);
       else renderHistory();   // cleared key -> show the "enter your key" empty state
     }
-    if (currentStep === 3) refreshNextBtn();
+    if (currentStep === 3) {
+      // The key the review's verification ran with changed. Debounced like the
+      // History reload so typing a key char-by-char doesn't fire a request per
+      // keystroke; populateReview re-runs verification with the new key.
+      refreshNextBtn();
+      clearTimeout(verifyDebounce);
+      verifyDebounce = setTimeout(() => { if (currentStep === 3) populateReview(); }, 600);
+    }
   });
 
   // Refresh the next button when any recipient input changes (event delegation)
@@ -1727,6 +1919,8 @@
     mt.disabled = locked;
   }
   $('opt-extra-service').addEventListener('change', syncMailClassLock);
+  // Checking/unchecking the undeliverable acknowledgment flips the send gate.
+  $('verify-ack').addEventListener('change', refreshNextBtn);
 
   $('btn-add-recipient').addEventListener('click', addRecipient);
   $('btn-back').addEventListener('click', () => { if (currentStep > 0) goToStep(currentStep - 1); });
