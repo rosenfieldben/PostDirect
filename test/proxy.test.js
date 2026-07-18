@@ -8,6 +8,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('node:http');
+const os = require('node:os');
+const fs = require('node:fs');
+const path = require('node:path');
 
 let upstream, upstreamPort, captured = null;
 let server, port;
@@ -32,6 +35,9 @@ test.before(() => new Promise((resolve) => {
     process.env.PD_SECRET = 'proxy-itest-secret-fixed';
     process.env.PD_USERNAME = 'itest-user';
     process.env.PD_PASSWORD = 'itest-pass';
+    // POST /v1/letters is now an audited call (item 1): point the store at a
+    // temp dir so this suite never writes into the repo's default ./data.
+    process.env.PD_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'pd-proxy-'));
     server = require('../server.js').server;
     server.listen(0, '127.0.0.1', () => { port = server.address().port; resolve(); });
   });

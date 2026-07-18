@@ -782,27 +782,15 @@
               <div class="field-hint">Blank page inserts an address page before your content.</div>
             </div>
           </div>
-          <div class="form-grid cols-2">
-            <div class="field">
-              <label class="field-label" for="opt-perforated">Perforated Page</label>
-              <select class="field-select" id="opt-perforated">
-                <option value="">None</option>
-                <option value="1">Page 1</option>
-                <option value="2">Page 2</option>
-                <option value="3">Page 3</option>
-              </select>
-              <div class="field-hint">Adds a perforated tear-off (e.g., for remittance slips).</div>
-            </div>
-            <div class="field">
-              <label class="field-label" for="opt-send-date">Send Date</label>
-              <input class="field-input" id="opt-send-date" type="date" />
-              <div class="field-hint">Schedule for a future date, or leave blank to send immediately.</div>
-            </div>
+          <div class="field">
+            <label class="field-label" for="opt-send-date">Send Date</label>
+            <input class="field-input" id="opt-send-date" type="date" />
+            <div class="field-hint">Schedule from tomorrow up to 180 days out, or leave blank to send immediately.</div>
           </div>
           <div class="options-row-checks">
             <label class="option-label"><input type="checkbox" id="opt-color" /> Color printing</label>
             <label class="option-label"><input type="checkbox" id="opt-double" /> Double-sided</label>
-            <label class="option-label"><input type="checkbox" id="opt-return-envelope" /> Include return envelope</label>
+            <label class="option-label" title="Lob requires a return envelope to ride a perforated first page, so the two are set together."><input type="checkbox" id="opt-reply-envelope" /> Reply envelope (adds a perforated first page)</label>
           </div>
           <div class="field" style="margin-top:18px">
             <label class="field-label" for="opt-description">Description / Memo</label>
@@ -911,14 +899,16 @@
   let recipients = [];  // array of { id, name, company, line1, line2, city, state, zip }
   let nextRecipientId = 1;
   let lastSendResults = null;  // array of { recipient, success, id?, error? }
-  // Per-recipient Lob Idempotency-Key values for the CURRENT compose session.
-  // Lifecycle is the whole point: if a send fails (or the network drops after
-  // Lob accepted it) and the user clicks Mail again, the SAME key is reused for
-  // that recipient, so Lob returns the original letter instead of printing a
-  // duplicate (Lob honors the key for 24 h). On a confirmed success the key is
-  // deleted, so a later intentional re-send to the same person is a new letter,
-  // not a replay. Do not "simplify" this into a fresh key per attempt.
-  const idempotencyKeys = new Map();  // recipient id -> uuid
+  // Durable idempotency: Lob Idempotency-Key values are persisted in
+  // localStorage keyed by a content FINGERPRINT (normalized recipient + shared
+  // options + uploaded-file hash), not by an in-memory recipient id. The old
+  // in-memory Map was discarded on reload/crash/closed-tab, after which
+  // resubmitting the same letter created duplicate physical mail. Now a reload
+  // followed by an identical resubmit reuses the same key within Lob's 24h
+  // window, so Lob de-dupes instead of printing twice. See the persistence
+  // helpers below (getOrCreatePersistedKey, pruneIdempotencyStore).
+  const IDEMPOTENCY_STORE_KEY = 'pd_idempotency_v1';
+  const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // Lob honors an idempotency key for 24 hours
   let history = [];                 // current render model (account-sourced)
   let optimistic = [];              // letters sent this session, shown until the Lob list catches up
   let historyEnv = null;            // 'live' | 'test' of the currently loaded list
@@ -1303,9 +1293,9 @@
   function removeRecipient(id) {
     if (recipients.length <= 1) return;
     recipients = readAllRecipients().filter(r => r.id !== id);
-    // The recipient set changed, so pending retry keys no longer describe the
-    // same send; drop them all rather than risk replaying a stale request.
-    idempotencyKeys.clear();
+    // Idempotency keys are now persisted by content fingerprint, not by
+    // recipient id, so changing the recipient set needs no key housekeeping: a
+    // removed recipient simply is not sent, and its key harmlessly prunes at 24h.
     renderRecipients();
   }
 
@@ -1398,8 +1388,7 @@
     const es = $('opt-extra-service').value; if (es) tags.push(el[es]);
     tags.push($('opt-use-type').value === 'marketing' ? 'Marketing' : 'Operational');
     if ($('opt-address-placement').value === 'insert_blank_page') tags.push('Blank address page');
-    if ($('opt-return-envelope').checked) tags.push('Return envelope');
-    const pf = $('opt-perforated').value; if (pf) tags.push('Perforated pg ' + pf);
+    if ($('opt-reply-envelope').checked) tags.push('Reply envelope (perforated pg 1)');
     const sd = $('opt-send-date').value; if (sd) tags.push('Send ' + sd);
     const desc = $('opt-description').value.trim(); if (desc) tags.push('“' + desc + '”');
     const modeTag = isLive() ? '<span class="mode-live">Live — real letters</span>' : '<span class="mode-test">Test mode</span>';
@@ -1498,6 +1487,69 @@
     return null;
   }
 
+  // ═══ Shared option validation and coupling (item 5) ═══
+  const SEND_DATE_MAX_DAYS = 180;
+  // Local calendar date as YYYY-MM-DD (the date input's value format).
+  function localDateStr(date) {
+    const pad = (x) => String(x).padStart(2, '0');
+    return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate());
+  }
+  // Reply mail couples two Lob fields: a return envelope requires a perforated
+  // first page (so the recipient can tear off and return a reply). Emitting
+  // them from ONE control makes it structurally impossible to send a return
+  // envelope without the perforation. Pure and named for unit testing.
+  function replyMailFields(replyEnvelope) {
+    return replyEnvelope ? [['return_envelope', 'true'], ['perforated_page', '1']] : [];
+  }
+  // Validate the scheduled send date against Lob's real constraints: empty means
+  // send immediately; otherwise it must be a calendar date from tomorrow up to
+  // SEND_DATE_MAX_DAYS out (Lob rejects same-day once its cutoff passes, and has
+  // no use for a date far in the future). Pure: today is injected as YYYY-MM-DD.
+  function validateSendDate(value, todayStr) {
+    if (!value) return { ok: true };
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return { ok: false, error: 'Send date must be a calendar date (YYYY-MM-DD).' };
+    const v = parseLobDate(value);
+    if (isNaN(v.getTime())) return { ok: false, error: 'Send date is not a valid date.' };
+    const today = parseLobDate(todayStr);
+    const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+    const max = new Date(today.getFullYear(), today.getMonth(), today.getDate() + SEND_DATE_MAX_DAYS);
+    if (v.getTime() < tomorrow.getTime()) return { ok: false, error: 'Send date must be tomorrow or later (Lob rejects a same-day or past date).' };
+    if (v.getTime() > max.getTime()) return { ok: false, error: 'Send date must be within ' + SEND_DATE_MAX_DAYS + ' days.' };
+    return { ok: true };
+  }
+  // Heuristic: does a Lob 422 message point at a SHARED option (so every letter
+  // in the batch would fail identically) rather than one recipient's address?
+  // Shared options are batch-wide; a recipient error names the recipient ("to")
+  // or their address and is per-letter. Used to halt a batch once instead of
+  // collecting 25 identical failures.
+  function isSharedOptionError(message) {
+    const m = String(message == null ? '' : message).toLowerCase();
+    const sharedField = /(send_date|send date|mail_type|mail type|extra_service|extra service|use_type|use type|perforated|return_envelope|return envelope|address_placement|address placement|double_sided|double-sided|\bcolor\b)/.test(m);
+    if (!sharedField) return false;
+    // Only a recipient FIELD PATH (to[...] / to....) makes it per-letter. The
+    // bare word "recipient" is NOT enough: Lob may name the recipient in a
+    // shared-option message ("send_date is invalid for recipient X"), and
+    // treating that as per-letter would defeat the halt and collect up to 25
+    // identical failures, the exact case this guards against.
+    const recipientField = /\bto\[|\bto\./.test(m);
+    return !recipientField;
+  }
+  // Result entries for the recipients AFTER a halt: the shared option they share
+  // was rejected on letter (failedIndex+1), so they were never sent. Named +
+  // pure so the halt semantics (which letters were rejected vs never attempted)
+  // are unit-testable without the browser send loop.
+  function notAttemptedEntries(rs, failedIndex) {
+    const out = [];
+    for (let j = failedIndex + 1; j < rs.length; j++) {
+      out.push({
+        recipient: rs[j], success: false, notAttempted: true,
+        error: 'Not attempted: a shared option was rejected on letter ' + (failedIndex + 1) +
+          ', so letters ' + (failedIndex + 2) + ' through ' + rs.length + ' were not sent.',
+      });
+    }
+    return out;
+  }
+
   // ═══ Common letter fields (independent of recipient) ═══
   function commonLetterFields() {
     const from = getFrom();
@@ -1511,9 +1563,12 @@
     fields.push(['use_type', $('opt-use-type').value]);
     fields.push(['address_placement', $('opt-address-placement').value]);
     const es = $('opt-extra-service').value; if (es) fields.push(['extra_service', es]);
-    if ($('opt-return-envelope').checked) fields.push(['return_envelope', 'true']);
-    const pf = $('opt-perforated').value; if (pf) fields.push(['perforated_page', pf]);
-    const sd = $('opt-send-date').value; if (sd) fields.push(['send_date', sd + 'T12:00:00.000Z']);
+    // Reply envelope + its required perforation, coupled so one can never be
+    // sent without the other.
+    replyMailFields($('opt-reply-envelope').checked).forEach((f) => fields.push(f));
+    // Date-only YYYY-MM-DD (was a T12:00:00Z timestamp): pairs with parseLobDate
+    // on display so the scheduled day is never off by one in a negative-UTC zone.
+    const sd = $('opt-send-date').value; if (sd) fields.push(['send_date', sd]);
     const desc = $('opt-description').value.trim(); if (desc) fields.push(['description', desc]);
     return fields;
   }
@@ -1525,20 +1580,102 @@
     return f;
   }
 
-  // ═══ Send (handles multiple recipients) ═══
-  // Pure helper (unit-tested by extraction): return the recipient's existing
-  // idempotency key, or mint and remember one. Reuse-on-retry is what makes an
-  // ambiguous network failure safe to re-send.
-  function getOrCreateIdempotencyKey(map, id, uuidFn) {
-    let key = map.get(id);
-    if (!key) { key = uuidFn(); map.set(id, key); }
-    return key;
+  // ═══ Durable idempotency + content fingerprint ═══
+  // Canonical string over the normalized recipient, the shared send options,
+  // and the uploaded-file hash. Named + pure so the extraction harness can pin
+  // its stability: sorted keys and trimmed strings mean the SAME logical letter
+  // always produces the SAME string (and therefore the same fingerprint),
+  // regardless of key order or incidental whitespace.
+  function canonicalizeSendInput(recipient, options, fileHashHex) {
+    const trim = (val) => String(val == null ? '' : val).trim();
+    const sortTrim = (obj) => {
+      const out = {};
+      Object.keys(obj || {}).sort().forEach((k) => { out[k] = trim(obj[k]); });
+      return out;
+    };
+    // options may arrive as commonLetterFields' array of [key, value] pairs or
+    // as a plain object; normalize both to a sorted, trimmed object.
+    let optObj = {};
+    if (Array.isArray(options)) options.forEach((pair) => { optObj[pair[0]] = pair[1]; });
+    else optObj = Object.assign({}, options);
+    return JSON.stringify({
+      recipient: sortTrim(recipient || {}),
+      options: sortTrim(optObj),
+      file: String(fileHashHex == null ? '' : fileHashHex),
+    });
   }
+  // SHA-256 hex of a BufferSource via Web Crypto (available in the browser; in
+  // the Node extraction tests the harness injects crypto).
+  async function sha256HexOf(data) {
+    const digest = await crypto.subtle.digest('SHA-256', data);
+    return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  async function computeFingerprint(recipient, options, fileHashHex) {
+    return sha256HexOf(new TextEncoder().encode(canonicalizeSendInput(recipient, options, fileHashHex)));
+  }
+  // Byte-for-byte mirror of server.js normalizeAddressForHash (pinned by a
+  // cross-implementation test). Sent as X-PD-Recipient-Hash on letter creation
+  // so the proof export can correlate a verification (hashed server-side from
+  // the SAME typed address) to this letter without depending on how Lob echoes
+  // the recipient back in its response.
+  function normalizeAddressForHash(a) {
+    const norm = (s) => String(s == null ? '' : s).toUpperCase().replace(/\s+/g, ' ').trim();
+    const zip5 = norm(a && a.zip).replace(/[^0-9].*$/, '').slice(0, 5);
+    return [norm(a && a.line1), norm(a && a.line2), norm(a && a.city), norm(a && a.state), zip5].join('|');
+  }
+  async function computeRecipientHash(to) {
+    return sha256HexOf(new TextEncoder().encode(normalizeAddressForHash(
+      { line1: to.line1, line2: to.line2, city: to.city, state: to.state, zip: to.zip })));
+  }
+  // Drop entries older than the 24h window (pure). Called on every load so the
+  // store never grows without bound and a stale key is never reused.
+  function pruneIdempotencyStore(store, now) {
+    const out = {};
+    Object.keys(store || {}).forEach((fp) => {
+      const rec = store[fp];
+      if (rec && typeof rec.createdAt === 'number' && (now - rec.createdAt) < IDEMPOTENCY_TTL_MS) out[fp] = rec;
+    });
+    return out;
+  }
+  function loadIdempotencyStore(storage, now) {
+    let parsed = {};
+    try { parsed = JSON.parse(storage.getItem(IDEMPOTENCY_STORE_KEY) || '{}') || {}; } catch (e) { parsed = {}; }
+    return pruneIdempotencyStore(parsed, now);
+  }
+  function saveIdempotencyStore(storage, store) {
+    try { storage.setItem(IDEMPOTENCY_STORE_KEY, JSON.stringify(store)); } catch (e) { /* storage full/unavailable: best effort */ }
+  }
+  // Reuse the persisted key for this fingerprint within the window, or mint and
+  // persist one BEFORE the send fires, so an interrupted send is safe to retry.
+  function getOrCreatePersistedKey(storage, fingerprint, now, uuidFn) {
+    const store = loadIdempotencyStore(storage, now);
+    let rec = store[fingerprint];
+    if (!rec) {
+      rec = { idempotencyKey: uuidFn(), createdAt: now };
+      store[fingerprint] = rec;
+      saveIdempotencyStore(storage, store);
+    }
+    return rec;
+  }
+  // Note the resulting letter id on the persisted record (best effort).
+  function recordSentLetter(storage, fingerprint, letterId, now) {
+    const store = loadIdempotencyStore(storage, now);
+    if (store[fingerprint]) { store[fingerprint].letterId = letterId; saveIdempotencyStore(storage, store); }
+  }
+
+  // ═══ Unload guard while a send is in flight ═══
+  // Leaving mid-batch can make the outcome ambiguous (Lob may have created a
+  // letter whose response we never saw). Warn on navigation while sending; the
+  // persisted key makes a reload-and-resubmit safe, but a warning is still owed.
+  function unloadGuard(e) { e.preventDefault(); e.returnValue = ''; return ''; }
+  function addUnloadGuard() { window.addEventListener('beforeunload', unloadGuard); }
+  function removeUnloadGuard() { window.removeEventListener('beforeunload', unloadGuard); }
 
   // Send the given recipients and return a results array, or null if a
   // pre-flight check failed (in which case an error was surfaced). Callers own
   // presentation (showSuccessView) so a retry can merge with earlier results.
-  async function sendToRecipients(rs) {
+  async function sendToRecipients(rs, opts) {
+    opts = opts || {};
     if (!hasKey()) { showError('Please enter your Lob API key above.'); return null; }
     if (!rs || rs.length === 0) { showError('Add at least one recipient.'); return null; }
     // Belt to the button's suspenders: the send button is disabled while these
@@ -1548,20 +1685,51 @@
     if (gate.blocked && !$('verify-ack').checked) { showError('One or more addresses are undeliverable. Correct them, or check the acknowledgment above to mail anyway.'); return null; }
     const payload = buildLetterPayload();
     if (!payload) { showError('Letter content is missing.'); return null; }
+    // Batch preflight: validate shared options ONCE, up front, before the first
+    // letter fires, so a bad send date fails immediately instead of once per
+    // recipient across a batch of up to 25.
+    const sdCheck = validateSendDate($('opt-send-date').value, localDateStr(new Date()));
+    if (!sdCheck.ok) { showError(sdCheck.error); return null; }
 
     sending = true; refreshNextBtn(); hideError();
-    const common = commonLetterFields();
-    const live = isLive();
     const results = [];
 
     try {
+      // Setup inside the try so any throw here (a missing DOM node, or
+      // crypto.subtle being unavailable in a non-secure context) is surfaced as
+      // an error while the finally still clears the sending flag and the unload
+      // guard, instead of rejecting silently and wedging the UI.
+      addUnloadGuard();
+      const common = commonLetterFields();
+      const live = isLive();
+      // One fingerprint + recipient-address hash per recipient; the uploaded-file
+      // hash is shared, so it is computed once. Fingerprints drive the duplicate
+      // warning and the persisted idempotency key; the recipient hash lets the
+      // proof export correlate a verification to this letter.
+      const fileHashHex = await sha256HexOf(payload.buffer);
+      const fingerprints = [];
+      const recipientHashes = [];
+      for (const to of rs) {
+        fingerprints.push(await computeFingerprint(to, common, fileHashHex));
+        recipientHashes.push(await computeRecipientHash(to));
+      }
+
+      // Duplicate warning (warn, never block): only for a fresh batch, not a
+      // deliberate "Retry failed". Consults the durable server record, so it
+      // fires even after the 24h client window has pruned the local key.
+      if (opts.warnDuplicates) {
+        const proceed = await confirmDuplicateSends(rs, fingerprints);
+        if (!proceed) return null; // operator cancelled; finally clears state
+      }
+
       for (let i = 0; i < rs.length; i++) {
         const to = rs[i];
+        const fingerprint = fingerprints[i];
         setProgress('Sending letter ' + (i + 1) + ' of ' + rs.length + ' — ' + (to.name || 'recipient'), true);
-        // Reused across retries within this compose session (see idempotencyKeys).
-        // Minted before the try so a build-time throw still records the failure
-        // under the same key, keeping a later retry idempotent.
-        const idemKey = getOrCreateIdempotencyKey(idempotencyKeys, to.id, () => crypto.randomUUID());
+        // Reused across retries AND across reloads: the key is persisted by
+        // fingerprint before the send fires, so an interrupted send is safe to
+        // re-attempt and Lob de-dupes an identical resubmit within 24h.
+        const idemKey = getOrCreatePersistedKey(window.localStorage, fingerprint, Date.now(), () => crypto.randomUUID()).idempotencyKey;
         try {
           // Build inside the try so a build-time throw is recorded as a per-recipient
           // failure rather than escaping the loop and wedging the UI (sending stuck true).
@@ -1569,14 +1737,16 @@
           const { body: mpBody, contentType } = buildMultipart(allFields, payload.buffer, payload.name, payload.mime);
           const resp = await fetch(LOB_BASE + '/v1/letters', {
             method: 'POST',
-            headers: Object.assign({ 'Content-Type': contentType, 'Idempotency-Key': idemKey }, authHeaders()),
+            headers: Object.assign({ 'Content-Type': contentType, 'Idempotency-Key': idemKey, 'X-PD-Fingerprint': fingerprint, 'X-PD-Recipient-Hash': recipientHashes[i] }, authHeaders()),
             body: mpBody
           });
           const data = await resp.json();
           if (data.error) throw new Error(data.error.message);
-          // Confirmed success: drop the key so a deliberate future send to this
-          // recipient creates a new letter instead of replaying this one.
-          idempotencyKeys.delete(to.id);
+          // Note the letter id on the persisted record (kept, not deleted): an
+          // identical resubmit within 24h reuses the key and Lob returns this
+          // same letter. The durable server record surfaces the duplicate
+          // warning for any resend after that.
+          recordSentLetter(window.localStorage, fingerprint, data.id, Date.now());
           results.push({ recipient: to, success: true, data });
           // Optimistic entry so a freshly sent letter shows immediately. It de-dupes
           // against the Lob list by id the next time History loads (Lob's object wins).
@@ -1604,36 +1774,91 @@
           history.unshift(entry);
           updateHistoryCount();
         } catch (e) {
-          // Key is intentionally NOT deleted here: a failed (possibly ambiguous)
-          // send keeps its key so "Retry failed" reuses it and Lob returns the
-          // original letter instead of printing a duplicate.
-          results.push({ recipient: to, success: false, error: e.message || 'Unknown error' });
+          // The persisted key is intentionally kept on failure: a failed
+          // (possibly ambiguous) send keeps its key so "Retry failed", or even a
+          // reload-and-resubmit, reuses it and Lob returns the original letter
+          // instead of printing a duplicate.
+          const msg = e.message || 'Unknown error';
+          results.push({ recipient: to, success: false, error: msg });
+          // If a SHARED option was rejected, every remaining letter shares it and
+          // would fail identically. Halt and mark the rest "not attempted" rather
+          // than collect up to 25 duplicate failures (see notAttemptedEntries).
+          if (isSharedOptionError(msg)) {
+            notAttemptedEntries(rs, i).forEach((r) => results.push(r));
+            break;
+          }
         }
       }
+    } catch (e) {
+      // An unexpected failure BEFORE or AROUND the per-letter loop (the setup
+      // above, the fingerprint/hash step, or a key mint) would otherwise reject
+      // silently and no-op the send with no feedback. Surface it. Per-letter
+      // send failures are still handled by the inner try/catch and do not reach
+      // here.
+      showError('Could not start the send: ' + (e && e.message ? e.message : 'unexpected error') + '. No letters were sent.');
+      return null;
     } finally {
       setProgress('', false);
       sending = false;
+      removeUnloadGuard();
+      refreshNextBtn();
     }
     return results;
   }
 
+  // Consult the durable server record for prior sends of each fingerprint and,
+  // on any hit, ask the operator to confirm. Warn, never block: the operator
+  // may legitimately resend (this tool's philosophy is to inform, not refuse,
+  // established by the anti-lockout decision). A network hiccup on the check
+  // never blocks the send. Returns true to proceed, false to cancel.
+  async function confirmDuplicateSends(rs, fingerprints) {
+    // Check every recipient's fingerprint in PARALLEL (was one serial round trip
+    // per recipient before the first letter fired). Promise.all preserves order,
+    // so the hits list stays in recipient order.
+    const checks = await Promise.all(rs.map(async (recipient, i) => {
+      try {
+        const resp = await fetch('/api/sends?fingerprint=' + encodeURIComponent(fingerprints[i]), { method: 'GET' });
+        if (!resp.ok) return null;
+        const j = await resp.json();
+        if (j && Array.isArray(j.sends) && j.sends.length) return { recipient, sends: j.sends };
+      } catch (e) { /* check failed: do not block the send */ }
+      return null;
+    }));
+    const hits = checks.filter(Boolean);
+    if (!hits.length) return true;
+    const describe = (h) => {
+      const s = h.sends[h.sends.length - 1];
+      let when = 'a prior date';
+      try { if (s && s.date) when = new Date(s.date).toLocaleString(); } catch (e) { /* keep default */ }
+      const times = h.sends.length > 1 ? (h.sends.length + ' prior sends, most recently ') : 'a prior send ';
+      return '• ' + (h.recipient.name || 'recipient') + ': ' + times + 'on ' + when + ' (' + (s && s.letterId ? s.letterId : 'unknown id') + ')';
+    };
+    return confirm(
+      'Possible duplicate send.\n\n' + hits.map(describe).join('\n') +
+      '\n\nAn identical letter to these recipients was already recorded on this account. ' +
+      'Within 24 hours an identical resubmit is de-duplicated by Lob (the same letter); after that it is a NEW piece of physical mail. ' +
+      'Send anyway?'
+    );
+  }
+
   async function sendLetters() {
     const rs = readAllRecipients();
-    const results = await sendToRecipients(rs);
-    if (!results) return; // pre-flight failed; error already shown
+    const results = await sendToRecipients(rs, { warnDuplicates: true });
+    if (!results) return; // pre-flight failed or cancelled; nothing to show
     lastSendResults = results;
     showSuccessView(results);
   }
 
-  // Re-send ONLY the recipients that failed, reusing their retained idempotency
+  // Re-send ONLY the recipients that failed, reusing their persisted idempotency
   // keys so an ambiguous failure (Lob created the letter but the response was
-  // lost) returns the original letter rather than mailing a duplicate. Prior
-  // successes are preserved and merged back so the view shows the full picture.
+  // lost) returns the original letter rather than mailing a duplicate. This is a
+  // deliberate retry, so the duplicate warning is suppressed. Prior successes are
+  // preserved and merged back so the view shows the full picture.
   async function retryFailed() {
     if (!lastSendResults) return;
     const failed = lastSendResults.filter(r => !r.success).map(r => r.recipient);
     if (failed.length === 0) return;
-    const newResults = await sendToRecipients(failed);
+    const newResults = await sendToRecipients(failed, { warnDuplicates: false });
     if (!newResults) return;
     const byId = new Map(newResults.map(r => [r.recipient.id, r]));
     // Keep original ordering; replace each prior failure with its new outcome.
@@ -1662,7 +1887,14 @@
     }
 
     $('success-results').innerHTML = results.map(r => {
-      const badge = r.success ? '<span class="status-badge success">Mailed</span>' : '<span class="status-badge error">Failed</span>';
+      // "Queued", not "Mailed": a create response only means Lob accepted the
+      // job, not that anything is in the mail yet. The honest label matches the
+      // "Letter Queued" success title.
+      // Three outcomes: Queued (accepted by Lob), Failed (Lob rejected this
+      // letter), and Not sent (a shared option was rejected on an earlier letter
+      // and the batch was halted, so this one was never attempted).
+      const badge = r.success ? '<span class="status-badge success">Queued</span>'
+        : (r.notAttempted ? '<span class="status-badge muted">Not sent</span>' : '<span class="status-badge error">Failed</span>');
       const sub = r.success ? '<div class="result-item-sub">' + esc(r.data.id) + '</div>' : '<div class="result-item-error">' + esc(r.error) + '</div>';
       let track = '';
       if (r.success && isTrackedService(r.data && r.data.extra_service)) {
@@ -1719,6 +1951,12 @@
     if (isNaN(d.getTime())) return s;
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
   }
+  // Honest lifecycle labels. USPS does not confirm final delivery for ordinary
+  // First-Class mail, so the terminal event Lob reports is usually "Processed
+  // for delivery", not a true "Delivered". Two rules follow: labels never
+  // promise more than the event Lob actually reported, and NO success state is
+  // ever inferred from timestamps alone (a create is not "Mailed"; a passed
+  // delivery estimate with no delivery event is unconfirmed, not delivered).
   function deriveStatus(letter) {
     if (letter.fetch_error) return { label: 'Status unavailable', variant: 'muted' };
     if (letter.deleted) return { label: 'Canceled', variant: 'muted' };
@@ -1729,21 +1967,25 @@
       const name = (latest.name || latest.type || '').toLowerCase();
       if (/delivered/.test(name)) return { label: 'Delivered', variant: 'success' };
       if (/returned/.test(name)) return { label: 'Returned', variant: 'error' };
-      if (/processed.*delivery|out for delivery/.test(name)) return { label: 'Out for delivery', variant: 'progress' };
+      // "Processed for delivery" is the strongest confirmation available for
+      // ordinary First-Class mail, so it is the success terminal.
+      if (/processed.*delivery/.test(name)) return { label: 'Processed for delivery', variant: 'success' };
+      if (/out for delivery/.test(name)) return { label: 'Out for delivery', variant: 'progress' };
       if (/re.?routed/.test(name)) return { label: 'Re-routed', variant: 'progress' };
       if (/local area/.test(name)) return { label: 'In local area', variant: 'progress' };
       if (/in.?transit/.test(name)) return { label: 'In transit', variant: 'progress' };
       if (/mailed/.test(name)) return { label: 'Mailed', variant: 'progress' };
       return { label: latest.name || 'In progress', variant: 'progress' };
     }
+    // No tracking events: a future send date is "Scheduled"; a passed delivery
+    // estimate is reported as unconfirmed (never a success); everything else is
+    // simply "Created". No timestamp ever yields a success variant.
     const now = Date.now();
     const send = letter.send_date ? parseLobDate(letter.send_date).getTime() : null;
     const expected = letter.expected_delivery_date ? parseLobDate(letter.expected_delivery_date).getTime() : null;
-    const created = letter.date_sent ? parseLobDate(letter.date_sent).getTime() : null;
     if (send && send > now + 60000) return { label: 'Scheduled · ' + formatShortDate(letter.send_date), variant: 'muted' };
-    if (created && (now - created) < 24 * 3600 * 1000) return { label: 'Processing', variant: 'progress' };
-    if (expected && now > expected) return { label: 'Delivered (est.)', variant: 'success' };
-    return { label: 'In transit', variant: 'progress' };
+    if (expected && now > expected) return { label: 'Expected by ' + formatShortDate(letter.expected_delivery_date) + ', no delivery confirmation', variant: 'muted' };
+    return { label: 'Created', variant: 'progress' };
   }
 
   // ═══ History view ═══
@@ -1778,8 +2020,12 @@
       const status = deriveStatus(h);
       const badge = '<span class="status-badge ' + status.variant + '">' + esc(status.label) + '</span>';
       const metaBits = [];
-      metaBits.push('<span><span class="key">Sent</span> ' + esc(formatShortDate(h.date_sent)) + '</span>');
-      if (h.expected_delivery_date) metaBits.push('<span><span class="key">Expected</span> ' + esc(formatShortDate(h.expected_delivery_date)) + '</span>');
+      // True field names: date_sent is Lob's date_created (see mapLobLetter), so
+      // it is labeled "Created", never "Sent". Send date and expected delivery
+      // are shown under their own names when present.
+      metaBits.push('<span><span class="key">Created</span> ' + esc(formatShortDate(h.date_sent)) + '</span>');
+      if (h.send_date) metaBits.push('<span><span class="key">Send date</span> ' + esc(formatShortDate(h.send_date)) + '</span>');
+      if (h.expected_delivery_date) metaBits.push('<span><span class="key">Expected delivery</span> ' + esc(formatShortDate(h.expected_delivery_date)) + '</span>');
       if (h.mail_type) {
         metaBits.push('<span>' + esc(MAIL_TYPE_LABELS[h.mail_type] || h.mail_type) + '</span>');
       }
@@ -1835,6 +2081,7 @@
             '<div class="letter-card-actions">' +
               badge +
               '<button class="btn-mini" type="button" data-refresh="' + esc(h.id) + '">Refresh</button>' +
+              (LETTER_ID_RE.test(h.id) ? '<button class="btn-mini" type="button" data-proof="' + esc(h.id) + '" title="Download a self-contained evidence bundle (request bytes, Lob response, rendered PDF, tracking, verifications, audit log) as a ZIP.">Export proof</button>' : '') +
               '<button class="btn-mini danger" type="button" data-delete="' + esc(h.id) + '">Remove</button>' +
             '</div>' +
           '</div>' +
@@ -1850,6 +2097,7 @@
 
     list.querySelectorAll('[data-refresh]').forEach(b => b.addEventListener('click', () => refreshOne(b.getAttribute('data-refresh'))));
     list.querySelectorAll('[data-delete]').forEach(b => b.addEventListener('click', () => removeFromHistory(b.getAttribute('data-delete'))));
+    list.querySelectorAll('[data-proof]').forEach(b => b.addEventListener('click', () => exportProof(b.getAttribute('data-proof'), b)));
     list.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copyText(b.getAttribute('data-copy'), b)));
     const moreBtn = $('btn-load-more');
     if (moreBtn) moreBtn.addEventListener('click', () => loadAccountHistory({ reset: false }));
@@ -1861,6 +2109,56 @@
       const envLabel = historyEnv === 'live' ? 'live' : 'test';
       const shown = history.length;
       $('history-last-refreshed').textContent = shown + (historyNextUrl ? '+' : '') + ' ' + envLabel + ' letter' + (shown === 1 ? '' : 's');
+    }
+  }
+
+  // Download the server-assembled evidence bundle for a letter. The endpoint
+  // validates the id server-side too; this guard just avoids offering the
+  // action for a non-letter id (e.g. an optimistic entry mid-send). The proof
+  // is built from the durable audit store, so it works even for a letter Lob
+  // has since aged out of its 90-day window.
+  const LETTER_ID_RE = /^ltr_[A-Za-z0-9]+$/;
+  async function exportProof(id, btn) {
+    if (!LETTER_ID_RE.test(id)) return;
+    const original = btn ? btn.textContent : null;
+    if (btn) { btn.disabled = true; btn.textContent = 'Exporting…'; }
+    try {
+      const resp = await fetch('/api/proof/' + encodeURIComponent(id), { method: 'GET' });
+      if (!resp.ok) {
+        let msg = 'Export failed (HTTP ' + resp.status + ')';
+        try { const j = await resp.json(); if (j && j.error && j.error.message) msg = j.error.message; } catch (e) { /* not json */ }
+        alert(msg);
+        return;
+      }
+      // Completeness signals from the server (also in manifest.json), read
+      // before saving so we can warn the operator that a bundle is partial.
+      const complete = resp.headers.get('X-PD-Proof-Complete') === 'true';
+      const hasLocalRecord = resp.headers.get('X-PD-Proof-Has-Local-Record') !== 'false';
+      const missing = (resp.headers.get('X-PD-Proof-Missing') || '').split(',').filter(Boolean);
+      const blob = await resp.blob();
+      // Prefer the server's Content-Disposition filename; fall back to a sane default.
+      let filename = 'proof-' + id + '.zip';
+      const cd = resp.headers.get('Content-Disposition') || '';
+      const m = /filename="([^"]+)"/.exec(cd);
+      if (m) filename = m[1];
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      // The file still downloads; the warning just makes a partial proof
+      // impossible to mistake for a complete evidentiary record.
+      if (!complete) {
+        const lead = hasLocalRecord
+          ? 'This proof was downloaded, but it is INCOMPLETE.'
+          : 'This proof was downloaded, but this letter has NO local record in this app (it was not sent through PostDirect), so the exact request bytes and Lob’s creation response are not included.';
+        alert(lead + (missing.length ? '\n\nMissing: ' + missing.join(', ') + '.' : '') +
+          '\n\nItems fetched live from Lob are unavailable after Lob’s 90-day window; export sooner to capture them.');
+      }
+    } catch (e) {
+      alert('Export failed: ' + (e.message || 'network error'));
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = original; }
     }
   }
 
@@ -2011,13 +2309,14 @@
 
   $('btn-reset').addEventListener('click', () => {
     recipients = [{ id: nextRecipientId++, name: '', company: '', line1: '', line2: '', city: '', state: '', zip: '' }];
-    // New compose session: any retry keys from the previous one are void.
-    idempotencyKeys.clear();
+    // No key housekeeping: persisted idempotency keys are content-addressed by
+    // fingerprint, so a fresh compose that happens to reproduce an identical
+    // letter correctly reuses its key (Lob de-dupes) until the 24h window prunes it.
     renderRecipients();
     $('letter-body').value = '';
-    $('opt-color').checked = false; $('opt-double').checked = false; $('opt-return-envelope').checked = false;
+    $('opt-color').checked = false; $('opt-double').checked = false; $('opt-reply-envelope').checked = false;
     $('opt-mail-type').value = 'usps_first_class'; $('opt-extra-service').value = ''; $('opt-use-type').value = 'operational';
-    $('opt-address-placement').value = 'top_first_page'; $('opt-perforated').value = ''; $('opt-send-date').value = ''; $('opt-description').value = '';
+    $('opt-address-placement').value = 'top_first_page'; $('opt-send-date').value = ''; $('opt-description').value = '';
     syncMailClassLock(); // values were reset programmatically (no change event), so re-derive the lock
     removeFile(); setMode('write'); hideError();
     goToStep(0, true);
@@ -2043,14 +2342,17 @@
   }).catch(() => { /* config unavailable — paste-in only, as before */ });
   updateHistoryCount();
   syncMailClassLock(); // in case the browser restored a stale extra-service selection
-  // Guard the Send Date against past values in the browser: Lob rejects a
-  // non-future send_date, and letting it fail only at the final Mail step is the
-  // late-failure pattern the mail-class lock deliberately avoids. min = today (local).
+  // Constrain the Send Date picker to the same window validateSendDate enforces:
+  // minimum tomorrow (Lob rejects a same-day or past date), maximum 180 days out.
+  // Bounding the picker avoids the late-failure pattern the mail-class lock also
+  // avoids; validateSendDate is the authoritative backstop at send time.
   (function () {
     const sd = $('opt-send-date');
-    const now = new Date();
-    const pad = (x) => String(x).padStart(2, '0');
-    sd.min = now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate());
+    const today = new Date();
+    const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+    const max = new Date(today.getFullYear(), today.getMonth(), today.getDate() + SEND_DATE_MAX_DAYS);
+    sd.min = localDateStr(tomorrow);
+    sd.max = localDateStr(max);
   })();
   // Start with one empty recipient card
   recipients = [{ id: nextRecipientId++, name: '', company: '', line1: '', line2: '', city: '', state: '', zip: '' }];

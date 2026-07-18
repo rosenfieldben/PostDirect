@@ -4,6 +4,13 @@ WORKDIR /app
 COPY --chown=node:node package.json ./
 COPY --chown=node:node server.js ./
 COPY --chown=node:node public/ ./public/
+# The durable audit store (PD_DATA_DIR, default /app/data) must be writable by
+# the unprivileged runtime user. Create it node-owned so the default works and
+# so a named volume mounted here inherits node ownership on first initialization.
+# Mount a volume at /app/data to persist records across container replacement
+# (see the README "Records and retention" section).
+RUN mkdir -p /app/data && chown node:node /app/data
+VOLUME /app/data
 EXPOSE 3491
 ENV PORT=3491
 ENV NODE_ENV=production

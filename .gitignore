@@ -1,2 +1,5 @@
 *.log
 node_modules/
+# Durable audit store (audit.log + content-addressed blobs). Never commit:
+# it holds client PII and the exact documents mailed.
+data/
