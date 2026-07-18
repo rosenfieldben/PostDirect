@@ -11,7 +11,7 @@ process.env.PD_PASSWORD = 'srvkey-pass';
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('node:http');
-const { server, lobAuthorization } = require('../server.js');
+const { server, lobAuthorization, lobKeyEnv } = require('../server.js');
 
 let port;
 
@@ -43,6 +43,18 @@ test('lobAuthorization: mints Basic auth from PD_LOB_KEY when the client sent no
 test('lobAuthorization: a client-supplied header always wins over the server key', () => {
   const clientAuth = 'Basic ' + Buffer.from('live_pasted_override:').toString('base64');
   assert.strictEqual(lobAuthorization(clientAuth), clientAuth);
+});
+
+test('lobKeyEnv: classifies test_/live_ and — critically — errs an UNRECOGNIZED key toward live', () => {
+  assert.strictEqual(lobKeyEnv('test_abc'), 'test');
+  assert.strictEqual(lobKeyEnv('live_abc'), 'live');
+  // The safety-critical branch: a key that does not start with test_ must be
+  // reported as 'live' so the UI never shows a reassuring "Test" badge for a
+  // key that actually spends postage.
+  assert.strictEqual(lobKeyEnv('xyz_garbage'), 'live');
+  assert.strictEqual(lobKeyEnv('  live_trimmed  '), 'live');
+  assert.strictEqual(lobKeyEnv(''), null);
+  assert.strictEqual(lobKeyEnv(null), null);
 });
 
 test('/api/config reports the server key and its environment (never the key itself)', async () => {

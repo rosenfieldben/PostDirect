@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { URL } = require('url');
+const { pipeline } = require('stream');
  
 // ══════════════════════════════════════════════════════════════
 // CONFIGURATION — set these via environment variables
@@ -35,7 +36,32 @@ const LOB_KEY = (process.env.PD_LOB_KEY || '').trim();
 // Lob keys are 'test_…' or 'live_…'. Anything unrecognized is reported as
 // 'live' so the UI errs toward the scary red live-mode treatment — showing
 // "Test" for a key that actually spends postage is the failure mode to avoid.
-const LOB_KEY_ENV = !LOB_KEY ? null : (LOB_KEY.startsWith('test_') ? 'test' : 'live');
+function lobKeyEnv(key) {
+  const k = (key == null ? '' : String(key)).trim();
+  if (!k) return null;
+  return k.startsWith('test_') ? 'test' : 'live';
+}
+const LOB_KEY_ENV = lobKeyEnv(LOB_KEY);
+
+// Upstream Lob API target. Defaults to Lob over HTTPS and is NEVER derived from
+// client input, so the no-SSRF / no-open-proxy property holds: a request can
+// only ever reach this one operator-configured origin. PD_LOB_UPSTREAM exists to
+// point the proxy at a local stub for integration tests (operator-only config,
+// same trust level as PD_LOB_KEY); malformed values fall back to Lob.
+const LOB_UPSTREAM = (() => {
+  const fallback = { hostname: 'api.lob.com', port: 443, transport: https };
+  const raw = (process.env.PD_LOB_UPSTREAM || '').trim();
+  if (!raw) return fallback;
+  try {
+    const u = new URL(raw);
+    const isHttp = u.protocol === 'http:';
+    return {
+      hostname: u.hostname,
+      port: u.port ? parseInt(u.port, 10) : (isHttp ? 80 : 443),
+      transport: isHttp ? http : https,
+    };
+  } catch (e) { return fallback; }
+})();
 
 // Request body size limits (bytes)
 const LOGIN_BODY_LIMIT = 16 * 1024;          // 16 KB — the login form is tiny
@@ -137,6 +163,11 @@ function readBody(req, res, maxBytes) {
       if (res && !res.headersSent) { try { res.writeHead(400); res.end(); } catch (e) { /* ignore */ } }
       done(null);
     });
+    // Settle on teardown too: a client that sends headers then aborts (or goes
+    // half-open) may never emit 'end' or 'error', which would leave this promise
+    // — and its awaiting handler — dangling. 'close' fires after 'end' as well,
+    // but done() is idempotent so the normal path already resolved by then.
+    req.on('close', () => done(null));
   });
 }
 
@@ -176,9 +207,26 @@ const userAttempts = new Map(); // username -> { count, first }
 function clientIp(req) {
   if (TRUST_PROXY) {
     const xff = req.headers['x-forwarded-for'];
-    if (xff) { const first = String(xff).split(',')[0].trim(); if (first) return first; }
+    if (xff) { const first = String(xff).split(',')[0].trim(); if (first) return ipBucket(first); }
   }
-  return req.socket.remoteAddress || 'unknown';
+  return ipBucket(req.socket.remoteAddress || 'unknown');
+}
+
+// Collapse an IPv6 address to its /64 prefix for the per-IP bucket key. A single
+// allocation routinely hands out a whole /64, so keying on the full address lets
+// an attacker mint unlimited distinct keys and sail past the per-IP cap; keying
+// on the /64 throttles the allocation as one source. IPv4 is returned as-is.
+function ipBucket(addr) {
+  let a = String(addr || 'unknown');
+  if (a.indexOf(':') === -1) return a;                 // IPv4 (or 'unknown')
+  if (a.lastIndexOf(':') > a.indexOf('.') && a.indexOf('.') !== -1) {
+    // IPv4-mapped IPv6 (e.g. ::ffff:1.2.3.4): key on the embedded IPv4.
+    return a.slice(a.lastIndexOf(':') + 1);
+  }
+  const hextets = a.split(':');
+  // Take the first four 16-bit groups (the /64 network prefix). '::' shorthand
+  // yields empty strings, which is fine — same collapsed prefix per source.
+  return hextets.slice(0, 4).join(':') + '::/64';
 }
 
 // Canonicalize a bucket key: trim and truncate. Applied to the username before
@@ -224,6 +272,13 @@ setInterval(() => {
   }
 }, LOGIN_WINDOW_MS).unref();
  
+// Minimal HTML escaper for values interpolated into a page template. Every
+// current loginPage(error) caller passes a static string, so this is
+// defense-in-depth: it removes the footgun so a future caller that forwards
+// user input (e.g. echoing a submitted username) can't introduce reflected XSS.
+const HTML_ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+function escapeHtml(s) { return (s == null ? '' : String(s)).replace(/[&<>"']/g, (c) => HTML_ESC[c]); }
+
 function sendJSON(res, status, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -482,7 +537,7 @@ function loginPage(error) {
     <div class="brand-name">PostDirect</div>
   </div>
   <div class="brand-sub">Physical mail · USPS</div>
-  ${error ? '<div class="error">' + error + '</div>' : ''}
+  ${error ? '<div class="error">' + escapeHtml(error) + '</div>' : ''}
   <form method="POST" action="/login">
     <div class="field">
       <label class="field-label" for="username">Username</label>
@@ -503,14 +558,25 @@ function loginPage(error) {
 // ══════════════════════════════════════════════════════════════
 // REQUEST ROUTER
 // ══════════════════════════════════════════════════════════════
-const server = http.createServer(async (req, res) => {
+async function route(req, res) {
   setSecurityHeaders(res); // every response: pages, static, proxy, redirects, errors
   // HSTS must only be sent over HTTPS per spec (browsers ignore it on plain
   // HTTP, and sending it there could poison local-dev setups), hence the
   // isSecure gate. Kept out of setSecurityHeaders on purpose: that function
   // deliberately takes no req, and its tests call it without one.
   if (isSecure(req)) res.setHeader('Strict-Transport-Security', 'max-age=15552000');
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  // req.headers.host is attacker-controlled and unvalidated: an invalid
+  // authority (spaces, a non-numeric port, an unclosed bracket) makes new URL
+  // throw ERR_INVALID_URL. Left unguarded that throw crashes the whole process
+  // (async handler -> unhandledRejection -> Node default exit), a trivial
+  // unauthenticated DoS, so parse defensively and answer 400 on garbage.
+  let url;
+  try {
+    url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  } catch (e) {
+    if (!res.headersSent) sendJSON(res, 400, { error: { message: 'Bad request' } });
+    return;
+  }
   const pathname = url.pathname;
  
   // ── Login page ──
@@ -527,9 +593,6 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(429, { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': String(Math.ceil(LOGIN_WINDOW_MS / 1000)) });
       res.end(loginPage('Too many failed attempts. Please wait a few minutes and try again.'));
     };
-    // The per-IP check stays BEFORE the body read: cheap rejection of a
-    // blocked source before allocating anything for the body.
-    if (attemptBlocked(ipAttempts, ip)) return tooMany();
     const body = await readBody(req, res, LOGIN_BODY_LIMIT);
     if (body === null) return; // 413/400 already sent
     const params = new URLSearchParams(body.toString());
@@ -537,11 +600,15 @@ const server = http.createServer(async (req, res) => {
     const pass = params.get('password') || '';
     const userKey = bucketKey(user, BUCKET_KEY_MAX);
 
-    // Credentials are evaluated BEFORE the username bucket is consulted (both
+    // Credentials are evaluated BEFORE either bucket is consulted (both
     // comparisons are constant-time, so the ordering leaks nothing). The why:
-    // the username bucket exists to throttle guessing, not to lock out the
-    // owner, so a correct password bypasses it entirely; otherwise 5 forged
-    // failures against the known username would deny the real user service.
+    // the buckets exist to throttle GUESSING, not to deny service to whoever
+    // holds the correct password. A correct login therefore always succeeds and
+    // clears both buckets — critically including the per-IP bucket. Behind a
+    // reverse proxy with PD_TRUST_PROXY off, every client collapses to the
+    // proxy's socket IP, so gating a correct login on the IP bucket would let
+    // any attacker's 5 failures lock out the real owner (and everyone else).
+    // Only FAILED attempts consult and consume the buckets, below.
     const userOk = safeEqual(user, USERNAME);
     const passOk = safeEqual(pass, PASSWORD);
     if (userOk && passOk) {
@@ -551,9 +618,9 @@ const server = http.createServer(async (req, res) => {
       setCookie(res, token, secure);
       return redirect(res, '/');
     }
-    // Wrong credentials: record in both buckets, then 429 once either is at
-    // the cap. Attacker-visible behavior is unchanged from the old ordering:
-    // wrong passwords still hit the limit.
+    // Wrong credentials. If either bucket is already at the cap, reject without
+    // recording further. Otherwise record in both, then 429 once either trips.
+    if (attemptBlocked(ipAttempts, ip) || (userKey && attemptBlocked(userAttempts, userKey))) return tooMany();
     recordAttempt(ipAttempts, ip);
     if (userKey) recordAttempt(userAttempts, userKey);
     if (attemptBlocked(ipAttempts, ip) || (userKey && attemptBlocked(userAttempts, userKey))) return tooMany();
@@ -586,11 +653,11 @@ const server = http.createServer(async (req, res) => {
     if (bodyBuf === null) return; // 413/400 already sent
  
     const options = {
-      hostname: 'api.lob.com',
-      port: 443,
+      hostname: LOB_UPSTREAM.hostname,
+      port: LOB_UPSTREAM.port,
       path: lobPath,
       method: req.method,
-      headers: { ...req.headers, host: 'api.lob.com' },
+      headers: { ...req.headers, host: LOB_UPSTREAM.hostname },
     };
     delete options.headers['origin'];
     delete options.headers['referer'];
@@ -606,13 +673,29 @@ const server = http.createServer(async (req, res) => {
     const lobAuth = lobAuthorization(options.headers['authorization']);
     if (lobAuth) options.headers['authorization'] = lobAuth;
  
-    const proxy = https.request(options, (lobRes) => {
+    const proxy = LOB_UPSTREAM.transport.request(options, (lobRes) => {
+      // The client may have already disconnected while we waited on Lob; writing
+      // to a destroyed response would throw from this async callback (outside the
+      // route try/catch) and crash the process. Bail cleanly instead.
+      if (res.destroyed) { lobRes.destroy(); return; }
       res.writeHead(lobRes.statusCode, {
         'Content-Type': lobRes.headers['content-type'] || 'application/json',
       });
-      lobRes.pipe(res);
+      // pipeline (not .pipe): an upstream mid-stream reset or a client abort is
+      // delivered as a handled callback error and tears BOTH streams down,
+      // rather than surfacing as an unhandled 'error' event that would crash the
+      // single-process server. .pipe() forwards neither source errors nor
+      // destination cleanup reliably across Node versions.
+      pipeline(lobRes, res, (err) => {
+        if (err) console.error('Lob proxy stream error:', err.code || err.message);
+      });
     });
- 
+
+    // If the client goes away BEFORE the response finished (a mid-stream abort),
+    // tear down the upstream request now instead of leaking its socket until the
+    // timeout. On a normal completion writableFinished is true, so we leave the
+    // request alone (and its socket free for keep-alive reuse).
+    res.on('close', () => { if (!res.writableFinished) proxy.destroy(); });
     proxy.setTimeout(PROXY_TIMEOUT_MS, () => proxy.destroy(new Error('Upstream request timed out')));
     proxy.on('error', (e) => {
       // Log the real error server-side only: upstream error strings can leak
@@ -636,11 +719,41 @@ const server = http.createServer(async (req, res) => {
  
   // ── Other static files ──
   serveStatic(res, pathname);
+}
+
+// Wrap every request in a catch-all so a throw anywhere in the router can never
+// take down the single-process server: on an un-streamed response answer 500,
+// otherwise tear the socket down. This is the per-request backstop; the
+// process-level handlers below are the last resort for anything outside a request.
+const server = http.createServer((req, res) => {
+  Promise.resolve()
+    .then(() => route(req, res))
+    .catch((e) => {
+      console.error('Unhandled request error:', e);
+      if (!res.headersSent) {
+        try { sendJSON(res, 500, { error: { message: 'Internal server error' } }); } catch (_) { /* ignore */ }
+      } else {
+        try { res.destroy(); } catch (_) { /* ignore */ }
+      }
+    });
 });
- 
+
+// Slow-body / slowloris and connection-exhaustion resistance: Node's defaults
+// (headers 60s, request 300s) are generous, so tighten them. requestTimeout is
+// kept high enough to admit a large (up to 52 MB) upload over a slow link.
+server.headersTimeout = 30 * 1000;      // headers must arrive within 30s
+server.requestTimeout = 120 * 1000;     // whole request (incl. body) within 120s
+server.keepAliveTimeout = 15 * 1000;    // idle keep-alive sockets close after 15s
+
 // Only bind the port when run directly (`node server.js`); requiring this module
 // (e.g. from tests) must NOT start the server.
 if (require.main === module) {
+  // Last-resort safety net for anything that escapes the per-request try/catch
+  // (timers, stream callbacks, native emitters). Log and keep serving rather
+  // than let Node's default policy terminate the process. Installed only as the
+  // entrypoint so importing the module in tests never swallows their failures.
+  process.on('uncaughtException', (e) => console.error('uncaughtException:', e));
+  process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e));
   server.listen(PORT, () => {
     console.log('');
     console.log('  PostDirect is running');
@@ -691,8 +804,11 @@ module.exports = {
   createSession,
   validateSession,
   safeEqual,
+  escapeHtml,
   lobAuthorization,
+  lobKeyEnv,
   clientIp,
+  ipBucket,
   bucketKey,
   attemptBlocked,
   recordAttempt,
