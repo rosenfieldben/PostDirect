@@ -368,6 +368,7 @@
     box-shadow: var(--shadow-sm);
   }
   .upload-zone.drag-over { border-style: solid; }
+  .upload-zone:focus-visible { outline: 2px solid var(--cobalt); outline-offset: 2px; border-color: var(--cobalt); }
   .upload-icon { color: var(--cobalt); margin-bottom: 16px; display: inline-flex; }
   .upload-text { font-size: 14.5px; color: var(--text); margin-bottom: 6px; }
   .upload-text strong { font-weight: 600; color: var(--ink); }
@@ -706,8 +707,8 @@
         <h1 class="section-title">Letter Content</h1>
         <p class="section-desc">Compose a letter directly or upload a PDF to be printed and mailed.</p>
         <div class="mode-tabs">
-          <button class="mode-tab active" id="tab-write" type="button">Write Letter</button>
-          <button class="mode-tab" id="tab-upload" type="button">Upload File</button>
+          <button class="mode-tab active" id="tab-write" type="button" aria-pressed="true">Write Letter</button>
+          <button class="mode-tab" id="tab-upload" type="button" aria-pressed="false">Upload File</button>
         </div>
         <div id="mode-write">
           <div class="field">
@@ -716,7 +717,7 @@
           </div>
         </div>
         <div id="mode-upload" class="is-hidden">
-          <div class="upload-zone" id="upload-zone">
+          <div class="upload-zone" id="upload-zone" role="button" tabindex="0" aria-label="Upload a PDF — activate to browse for a file, or drag and drop one here">
             <input type="file" id="file-input" accept=".pdf" style="display:none" />
             <div class="upload-icon">
               <svg width="36" height="36" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -828,8 +829,8 @@
         <div class="preview-label">Letter Preview</div>
         <div class="letter-preview" id="review-body"></div>
         <div class="meta-row" id="review-meta"></div>
-        <div class="error-box is-hidden" id="error-box"></div>
-        <div class="send-progress is-hidden" id="send-progress">
+        <div class="error-box is-hidden" id="error-box" role="alert"></div>
+        <div class="send-progress is-hidden" id="send-progress" role="status" aria-live="polite">
           <div class="send-progress-spinner"></div>
           <span id="send-progress-text">Sending…</span>
         </div>
@@ -848,8 +849,9 @@
         </div>
         <div class="success-results" id="success-results"></div>
         <div class="success-actions">
+          <button class="btn btn-primary" id="btn-retry-failed" style="display:none" title="Re-sends only the failed recipients, reusing the same idempotency key so a letter Lob already created is never duplicated.">Retry failed</button>
           <button class="btn btn-secondary" id="btn-view-history">View in History</button>
-          <button class="btn btn-primary" id="btn-reset">Send Another</button>
+          <button class="btn btn-secondary" id="btn-reset">Send Another</button>
         </div>
       </div>
 
@@ -896,6 +898,11 @@
   const HISTORY_PAGE_LIMIT = 100;   // Lob's max page size for GET /v1/letters
   const HISTORY_MAX = 200;          // letters loaded per fetch ("Load older" pages beyond this)
   const TRACKED_SERVICES = ['certified', 'certified_return_receipt', 'registered'];
+  // Single source of truth for the human labels — previously inlined in both
+  // populateReview and renderHistory, where they had drifted (the same service
+  // read "Certified + Return Receipt" on Review but "Certified + RR" in History).
+  const MAIL_TYPE_LABELS = { usps_first_class: 'First Class', usps_standard: 'Standard' };
+  const EXTRA_SERVICE_LABELS = { '': 'None', certified: 'Certified', certified_return_receipt: 'Certified + Return Receipt', registered: 'Registered' };
 
   // ── App state ──
   let currentStep = 0, sending = false;
@@ -948,9 +955,11 @@
   const usingServerKey = () => serverKey && !apiKey();
   const hasKey = () => usingServerKey() || !!apiKey();
   const isLive = () => usingServerKey() ? serverKeyEnv === 'live' : $('api-key-input').value.startsWith('live_');
-  // Identity of the key History was last loaded with; the sentinel keeps the
-  // server key distinguishable from any pasteable string.
-  const keyIdentity = () => usingServerKey() ? ' server-key' : apiKey();
+  // Identity of the key History was last loaded with. A unique object
+  // sentinel (compared by reference) keeps the server key distinguishable
+  // from any pasteable string without embedding a control character in source.
+  const SERVER_KEY_ID = { serverKey: true };
+  const keyIdentity = () => usingServerKey() ? SERVER_KEY_ID : apiKey();
 
   // ═══ History engine (sourced from the Lob account via List Letters) ═══
   function updateHistoryCount() {
@@ -1218,7 +1227,6 @@
   function getFrom() {
     return { name: v('from-name'), company: v('from-company'), line1: v('from-line1'), line2: v('from-line2'), city: v('from-city'), state: v('from-state'), zip: v('from-zip') };
   }
-  function getRecipient(id) { return recipients.find(r => r.id === id); }
   function readRecipientFromDOM(id) {
     const g = key => { const el = document.getElementById('r-' + id + '-' + key); return el ? el.value.trim() : ''; };
     return { id, name: g('name'), company: g('company'), line1: g('line1'), line2: g('line2'), city: g('city'), state: g('state'), zip: g('zip') };
@@ -1312,12 +1320,14 @@
       btn.classList.toggle('live', isLive()); // Live mode wears the wax (styling class only)
     }
   }
-  function goToStep(n) {
+  function goToStep(n, focus) {
     currentStep = n;
     panels.forEach((p, i) => p.classList.toggle('is-hidden', i !== n));
     for (let i = 0; i < 4; i++) {
       const l = $('sl-' + i);
       l.className = 'step-label' + (i < n ? ' done' : i === n ? ' active' : '');
+      // Expose the active step to assistive tech (the visual state alone is silent).
+      if (i === n) l.setAttribute('aria-current', 'step'); else l.removeAttribute('aria-current');
     }
     const pct = n === 0 ? 0 : n === 1 ? 33.33 : n === 2 ? 66.66 : 100;
     $('steps-fill').style.width = pct + '%';
@@ -1327,6 +1337,13 @@
     if (n === 3) populateReview();
     refreshNextBtn();
     const p = panels[n]; if (p) { p.classList.remove('animate-in'); void p.offsetWidth; p.classList.add('animate-in'); }
+    // On a user-driven step change, land focus on the new step's heading so
+    // keyboard/screen-reader users are told where they are (skipped on first
+    // paint so the page doesn't steal focus on load).
+    if (focus && p) {
+      const heading = p.querySelector('.section-title, .success-title');
+      if (heading) { heading.setAttribute('tabindex', '-1'); heading.focus(); }
+    }
   }
 
   // ═══ Review ═══
@@ -1348,7 +1365,7 @@
       '<div class="addr-card">' +
         '<div class="addr-card-label"><span>To</span>' + (rs.length > 1 ? '<span class="recipient-idx">#' + (i + 1) + '</span>' : '') + '</div>' +
         '<div class="addr-card-body">' + formatAddrInline(r) + '</div>' +
-        '<div class="verify-line" id="verify-r-' + esc(r.id) + '"></div>' +
+        '<div class="verify-line" id="verify-r-' + esc(r.id) + '" role="status" aria-live="polite"></div>' +
       '</div>'
     ).join('');
     runReviewVerification(rs);
@@ -1359,8 +1376,8 @@
     } else if (uploadedFile) {
       $('review-body').innerHTML = '<div style="display:flex;align-items:center;gap:14px;padding:8px 0"><div class="file-icon" style="width:40px;height:40px">' + esc(uploadedFile.type.toUpperCase()) + '</div><div><div style="font-weight:600;font-size:14px;color:#0f1419">' + esc(uploadedFile.name) + '</div><div style="font-size:12px;color:#9ca0a8">' + formatFileSize(uploadedFile.size) + '</div></div></div>';
     }
-    const ml = {'usps_first_class':'First Class','usps_standard':'Standard'};
-    const el = {'':'None','certified':'Certified','certified_return_receipt':'Certified + Return Receipt','registered':'Registered'};
+    const ml = MAIL_TYPE_LABELS;
+    const el = EXTRA_SERVICE_LABELS;
     const tags = [];
     tags.push(rs.length + ' recipient' + (rs.length === 1 ? '' : 's'));
     tags.push(contentMode === 'upload' ? 'Uploaded PDF' : 'Written letter');
@@ -1407,6 +1424,11 @@
   }
   function removeFile() { uploadedFile = null; fileInput.value = ''; uploadZone.classList.remove('is-hidden'); fileInfo.classList.add('is-hidden'); refreshNextBtn(); }
   uploadZone.addEventListener('click', () => fileInput.click());
+  // Keyboard access: the drop zone is role="button" tabindex="0", so Enter/Space
+  // must trigger the file picker just like a click would.
+  uploadZone.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); fileInput.click(); }
+  });
   fileInput.addEventListener('change', e => { if (e.target.files[0]) handleFile(e.target.files[0]); });
   uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
   uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
@@ -1418,6 +1440,8 @@
     contentMode = m;
     $('tab-write').classList.toggle('active', m === 'write');
     $('tab-upload').classList.toggle('active', m === 'upload');
+    $('tab-write').setAttribute('aria-pressed', m === 'write' ? 'true' : 'false');
+    $('tab-upload').setAttribute('aria-pressed', m === 'upload' ? 'true' : 'false');
     $('mode-write').classList.toggle('is-hidden', m !== 'write');
     $('mode-upload').classList.toggle('is-hidden', m !== 'upload');
     refreshNextBtn();
@@ -1500,76 +1524,110 @@
     return key;
   }
 
-  async function sendLetters() {
-    if (!hasKey()) { showError('Please enter your Lob API key above.'); return; }
-    const rs = readAllRecipients();
-    if (rs.length === 0) { showError('Add at least one recipient.'); return; }
+  // Send the given recipients and return a results array, or null if a
+  // pre-flight check failed (in which case an error was surfaced). Callers own
+  // presentation (showSuccessView) so a retry can merge with earlier results.
+  async function sendToRecipients(rs) {
+    if (!hasKey()) { showError('Please enter your Lob API key above.'); return null; }
+    if (!rs || rs.length === 0) { showError('Add at least one recipient.'); return null; }
     // Belt to the button's suspenders: the send button is disabled while these
     // hold, but re-check here so a stale enabled state can't slip a send through.
     const gate = verificationGate();
-    if (gate.pending) { showError('Address verification is still running — one moment.'); return; }
-    if (gate.blocked && !$('verify-ack').checked) { showError('One or more addresses are undeliverable. Correct them, or check the acknowledgment above to mail anyway.'); return; }
+    if (gate.pending) { showError('Address verification is still running — one moment.'); return null; }
+    if (gate.blocked && !$('verify-ack').checked) { showError('One or more addresses are undeliverable. Correct them, or check the acknowledgment above to mail anyway.'); return null; }
     const payload = buildLetterPayload();
-    if (!payload) { showError('Letter content is missing.'); return; }
+    if (!payload) { showError('Letter content is missing.'); return null; }
 
     sending = true; refreshNextBtn(); hideError();
     const common = commonLetterFields();
     const live = isLive();
     const results = [];
 
-    for (let i = 0; i < rs.length; i++) {
-      const to = rs[i];
-      setProgress('Sending letter ' + (i + 1) + ' of ' + rs.length + ' — ' + (to.name || 'recipient'), true);
-      const allFields = recipientFields(to).concat(common);
-      const { body: mpBody, contentType } = buildMultipart(allFields, payload.buffer, payload.name, payload.mime);
-      // Reused across retries within this compose session (see idempotencyKeys).
-      const idemKey = getOrCreateIdempotencyKey(idempotencyKeys, to.id, () => crypto.randomUUID());
-      try {
-        const resp = await fetch(LOB_BASE + '/v1/letters', {
-          method: 'POST',
-          headers: Object.assign({ 'Content-Type': contentType, 'Idempotency-Key': idemKey }, authHeaders()),
-          body: mpBody
-        });
-        const data = await resp.json();
-        if (data.error) throw new Error(data.error.message);
-        // Confirmed success: drop the key so a deliberate future send to this
-        // recipient creates a new letter instead of replaying this one.
-        idempotencyKeys.delete(to.id);
-        results.push({ recipient: to, success: true, data });
-        // Optimistic entry so a freshly sent letter shows immediately. It de-dupes
-        // against the Lob list by id the next time History loads (Lob's object wins).
-        const entry = {
-          id: data.id,
-          recipient_name: to.name,
-          recipient_company: to.company || '',
-          recipient_address: [to.line1, to.line2, [to.city, to.state, to.zip].filter(Boolean).join(', ')].filter(Boolean).join(' · '),
-          sender_name: getFrom().name,
-          date_sent: data.date_created || new Date().toISOString(),
-          send_date: data.send_date || null,
-          expected_delivery_date: data.expected_delivery_date || null,
-          mail_type: data.mail_type || $('opt-mail-type').value,
-          extra_service: data.extra_service || ($('opt-extra-service').value || null),
-          tracking_number: data.tracking_number || null,
-          description: data.description || ($('opt-description').value.trim() || ''),
-          mode: live ? 'live' : 'test',
-          last_refreshed: new Date().toISOString(),
-          tracking_events: Array.isArray(data.tracking_events) ? data.tracking_events : [],
-          deleted: !!data.deleted,
-          fetch_error: null,
-          _lob: false,
-        };
-        optimistic.unshift(entry);
-        history.unshift(entry);
-        updateHistoryCount();
-      } catch (e) {
-        results.push({ recipient: to, success: false, error: e.message || 'Unknown error' });
+    try {
+      for (let i = 0; i < rs.length; i++) {
+        const to = rs[i];
+        setProgress('Sending letter ' + (i + 1) + ' of ' + rs.length + ' — ' + (to.name || 'recipient'), true);
+        // Reused across retries within this compose session (see idempotencyKeys).
+        // Minted before the try so a build-time throw still records the failure
+        // under the same key, keeping a later retry idempotent.
+        const idemKey = getOrCreateIdempotencyKey(idempotencyKeys, to.id, () => crypto.randomUUID());
+        try {
+          // Build inside the try so a build-time throw is recorded as a per-recipient
+          // failure rather than escaping the loop and wedging the UI (sending stuck true).
+          const allFields = recipientFields(to).concat(common);
+          const { body: mpBody, contentType } = buildMultipart(allFields, payload.buffer, payload.name, payload.mime);
+          const resp = await fetch(LOB_BASE + '/v1/letters', {
+            method: 'POST',
+            headers: Object.assign({ 'Content-Type': contentType, 'Idempotency-Key': idemKey }, authHeaders()),
+            body: mpBody
+          });
+          const data = await resp.json();
+          if (data.error) throw new Error(data.error.message);
+          // Confirmed success: drop the key so a deliberate future send to this
+          // recipient creates a new letter instead of replaying this one.
+          idempotencyKeys.delete(to.id);
+          results.push({ recipient: to, success: true, data });
+          // Optimistic entry so a freshly sent letter shows immediately. It de-dupes
+          // against the Lob list by id the next time History loads (Lob's object wins).
+          const entry = {
+            id: data.id,
+            recipient_name: to.name,
+            recipient_company: to.company || '',
+            recipient_address: [to.line1, to.line2, [to.city, to.state, to.zip].filter(Boolean).join(', ')].filter(Boolean).join(' · '),
+            sender_name: getFrom().name,
+            date_sent: data.date_created || new Date().toISOString(),
+            send_date: data.send_date || null,
+            expected_delivery_date: data.expected_delivery_date || null,
+            mail_type: data.mail_type || $('opt-mail-type').value,
+            extra_service: data.extra_service || ($('opt-extra-service').value || null),
+            tracking_number: data.tracking_number || null,
+            description: data.description || ($('opt-description').value.trim() || ''),
+            mode: live ? 'live' : 'test',
+            last_refreshed: new Date().toISOString(),
+            tracking_events: Array.isArray(data.tracking_events) ? data.tracking_events : [],
+            deleted: !!data.deleted,
+            fetch_error: null,
+            _lob: false,
+          };
+          optimistic.unshift(entry);
+          history.unshift(entry);
+          updateHistoryCount();
+        } catch (e) {
+          // Key is intentionally NOT deleted here: a failed (possibly ambiguous)
+          // send keeps its key so "Retry failed" reuses it and Lob returns the
+          // original letter instead of printing a duplicate.
+          results.push({ recipient: to, success: false, error: e.message || 'Unknown error' });
+        }
       }
+    } finally {
+      setProgress('', false);
+      sending = false;
     }
+    return results;
+  }
 
-    setProgress('', false);
-    sending = false;
+  async function sendLetters() {
+    const rs = readAllRecipients();
+    const results = await sendToRecipients(rs);
+    if (!results) return; // pre-flight failed; error already shown
     lastSendResults = results;
     showSuccessView(results);
+  }
+
+  // Re-send ONLY the recipients that failed, reusing their retained idempotency
+  // keys so an ambiguous failure (Lob created the letter but the response was
+  // lost) returns the original letter rather than mailing a duplicate. Prior
+  // successes are preserved and merged back so the view shows the full picture.
+  async function retryFailed() {
+    if (!lastSendResults) return;
+    const failed = lastSendResults.filter(r => !r.success).map(r => r.recipient);
+    if (failed.length === 0) return;
+    const newResults = await sendToRecipients(failed);
+    if (!newResults) return;
+    const byId = new Map(newResults.map(r => [r.recipient.id, r]));
+    // Keep original ordering; replace each prior failure with its new outcome.
+    lastSendResults = lastSendResults.map(r => r.success ? r : (byId.get(r.recipient.id) || r));
+    showSuccessView(lastSendResults);
   }
 
   // ═══ Success view ═══
@@ -1619,7 +1677,10 @@
       );
     }).join('');
     $('success-results').querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copyText(b.getAttribute('data-copy'), b)));
-    goToStep(4);
+    // Offer an idempotency-preserving retry only when something failed.
+    const retryBtn = $('btn-retry-failed');
+    if (retryBtn) retryBtn.style.display = fail > 0 ? '' : 'none';
+    goToStep(4, true);
   }
 
   // ═══ Status derivation from Lob fields ═══
@@ -1628,14 +1689,6 @@
     const d = new Date(s);
     if (isNaN(d.getTime())) return s;
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-  }
-  function formatRelativeTime(s) {
-    if (!s) return '';
-    const d = new Date(s), now = Date.now(), diff = now - d.getTime();
-    if (diff < 60000) return 'just now';
-    if (diff < 3600000) return Math.floor(diff / 60000) + ' min ago';
-    if (diff < 86400000) return Math.floor(diff / 3600000) + ' hr ago';
-    return formatShortDate(s);
   }
   function deriveStatus(letter) {
     if (letter.fetch_error) return { label: 'Status unavailable', variant: 'muted' };
@@ -1699,12 +1752,10 @@
       metaBits.push('<span><span class="key">Sent</span> ' + esc(formatShortDate(h.date_sent)) + '</span>');
       if (h.expected_delivery_date) metaBits.push('<span><span class="key">Expected</span> ' + esc(formatShortDate(h.expected_delivery_date)) + '</span>');
       if (h.mail_type) {
-        const ml = {'usps_first_class':'First Class','usps_standard':'Standard'};
-        metaBits.push('<span>' + esc(ml[h.mail_type] || h.mail_type) + '</span>');
+        metaBits.push('<span>' + esc(MAIL_TYPE_LABELS[h.mail_type] || h.mail_type) + '</span>');
       }
       if (h.extra_service) {
-        const el = {'certified':'Certified','certified_return_receipt':'Certified + RR','registered':'Registered'};
-        metaBits.push('<span>' + esc(el[h.extra_service] || h.extra_service) + '</span>');
+        metaBits.push('<span>' + esc(EXTRA_SERVICE_LABELS[h.extra_service] || h.extra_service) + '</span>');
       }
       metaBits.push('<span><code>' + esc(h.id) + '</code></span>');
       if (h.mode === 'test') metaBits.push('<span style="color:var(--text-muted)">Test</span>');
@@ -1923,9 +1974,9 @@
   $('verify-ack').addEventListener('change', refreshNextBtn);
 
   $('btn-add-recipient').addEventListener('click', addRecipient);
-  $('btn-back').addEventListener('click', () => { if (currentStep > 0) goToStep(currentStep - 1); });
+  $('btn-back').addEventListener('click', () => { if (currentStep > 0) goToStep(currentStep - 1, true); });
   $('btn-next').addEventListener('click', () => {
-    if (currentStep < 3) { if (canProceed()) goToStep(currentStep + 1); }
+    if (currentStep < 3) { if (canProceed()) goToStep(currentStep + 1, true); }
     else if (currentStep === 3) sendLetters();
   });
 
@@ -1940,9 +1991,10 @@
     $('opt-address-placement').value = 'top_first_page'; $('opt-perforated').value = ''; $('opt-send-date').value = ''; $('opt-description').value = '';
     syncMailClassLock(); // values were reset programmatically (no change event), so re-derive the lock
     removeFile(); setMode('write'); hideError();
-    goToStep(0);
+    goToStep(0, true);
   });
   $('btn-view-history').addEventListener('click', () => setView('history'));
+  $('btn-retry-failed').addEventListener('click', retryFailed);
   $('btn-refresh-all').addEventListener('click', refreshAll);
 
   // ═══ Init ═══
@@ -1962,6 +2014,15 @@
   }).catch(() => { /* config unavailable — paste-in only, as before */ });
   updateHistoryCount();
   syncMailClassLock(); // in case the browser restored a stale extra-service selection
+  // Guard the Send Date against past values in the browser: Lob rejects a
+  // non-future send_date, and letting it fail only at the final Mail step is the
+  // late-failure pattern the mail-class lock deliberately avoids. min = today (local).
+  (function () {
+    const sd = $('opt-send-date');
+    const now = new Date();
+    const pad = (x) => String(x).padStart(2, '0');
+    sd.min = now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate());
+  })();
   // Start with one empty recipient card
   recipients = [{ id: nextRecipientId++, name: '', company: '', line1: '', line2: '', city: '', state: '', zip: '' }];
   renderRecipients();

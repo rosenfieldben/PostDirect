@@ -3,7 +3,7 @@ process.env.PD_SECRET = process.env.PD_SECRET || 'test-secret-fixed-value';
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { setSecurityHeaders } = require('../server.js');
+const { setSecurityHeaders, escapeHtml } = require('../server.js');
 
 function fakeRes() {
   const headers = {};
@@ -32,4 +32,12 @@ test('CSP allows exactly what the app needs and nothing looser', () => {
   assert.match(csp, /(^|; )frame-ancestors 'none'(;|$)/);
   // No remote script/connect origins leaked in.
   assert.ok(!/script-src[^;]*https?:\/\//.test(csp), 'no remote script origins');
+});
+
+test('escapeHtml neutralizes markup and quotes for the login page error sink', () => {
+  assert.strictEqual(escapeHtml('<script>alert(1)</script>'), '&lt;script&gt;alert(1)&lt;/script&gt;');
+  assert.strictEqual(escapeHtml('a"b\'c&d'), 'a&quot;b&#39;c&amp;d');
+  assert.strictEqual(escapeHtml(''), '');
+  assert.strictEqual(escapeHtml(null), '');
+  assert.strictEqual(escapeHtml(undefined), '');
 });
