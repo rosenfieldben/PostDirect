@@ -21,5 +21,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      # Zero-dependency project: no npm install step, straight to the tests.
+      # Zero runtime dependencies: the unit suite needs no npm install.
       - run: npm test
+
+  # Browser characterization suite (Playwright, chromium headless). Item 8
+  # expands CI further (adds a docker job and consolidates).
+  browser:
+    runs-on: ubuntu-latest
+    name: Browser (Playwright)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # Playwright is the one devDependency; install it and its chromium build.
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
