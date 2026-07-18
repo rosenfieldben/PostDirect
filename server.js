@@ -73,6 +73,20 @@ const LOGIN_MAX_ATTEMPTS = 5;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;      // 15 minutes
 const BUCKET_KEY_MAX = 256;                  // max chars of a username used as a bucket key
 const ATTEMPT_MAP_MAX = 10000;               // max distinct keys per bucket between sweeps
+// Progressive failure delay, indexed by consecutive failures for a key: the
+// first failure answers immediately, then 0.5s/1s/2s, capped at 4s. The cap
+// keeps a slow-guess response from becoming a socket-holding primitive while
+// still slowing an online guesser by orders of magnitude; a fat-fingered
+// human retyping a password barely notices. Failure responses only: a
+// correct password is never delayed.
+const FAIL_DELAY_SCHEDULE_MS = [0, 500, 1000, 2000, 4000];
+// Global failure throttle: a process-wide ceiling on FAILED attempts per
+// window across ALL bucket keys, so rotating IPs or mangling the username
+// (a fresh bucket key every attempt) cannot buy unlimited tries. 50 per
+// window is far above any legitimate typo rate and far below a useful
+// online guessing rate.
+const GLOBAL_FAIL_MAX = 50;
+const GLOBAL_FAIL_WINDOW_MS = LOGIN_WINDOW_MS; // one window size everywhere
  
 // ══════════════════════════════════════════════════════════════
 // STATELESS SESSIONS — HMAC-signed cookies, no server-side store
@@ -260,6 +274,45 @@ function recordAttempt(map, key) {
 }
 
 function clearAttempts(map, key) { map.delete(key); }
+
+// ── Progressive failure delay + global failure throttle ──
+// Two layers on top of the buckets above. Neither layer ever gates credential
+// evaluation (see the anti-lockout comment in the login route): they only
+// shape how attempts that were ALREADY evaluated as failed are answered.
+let globalFailures = { count: 0, first: 0 };  // process-wide failed-attempt window
+
+// Decide how to answer an evaluated login attempt. Pure: counters go in, the
+// successor global state comes out, and time is the injected now, so unit
+// tests drive the clock and never sleep. keyFailures is the consecutive
+// failure count for this attempt's bucket key INCLUDING this attempt
+// (successes clear the buckets, so a bucket count IS the consecutive-failure
+// count within the window). Returns one of:
+//   { action: 'allow' }     correct password: never delayed, never throttled
+//   { action: 'throttle' }  global ceiling hit: fast uniform 429
+//   { action: 'delay' }     failure: respond after delayMs per the schedule
+function loginThrottleDecision(outcome, global, keyFailures, now) {
+  if (outcome === 'ok') return { action: 'allow', delayMs: 0, global };
+  const g = (global.count > 0 && now - global.first > GLOBAL_FAIL_WINDOW_MS)
+    ? { count: 0, first: 0 }
+    : global;
+  if (g.count >= GLOBAL_FAIL_MAX) {
+    // No delay once tripped: sleeping here would let a flood use the delay
+    // itself to pin open sockets, so the rejection must be fast.
+    return { action: 'throttle', delayMs: 0, global: g };
+  }
+  const idx = Math.min(Math.max(keyFailures, 1), FAIL_DELAY_SCHEDULE_MS.length) - 1;
+  return {
+    action: 'delay',
+    delayMs: FAIL_DELAY_SCHEDULE_MS[idx],
+    global: { count: g.count + 1, first: g.count === 0 ? now : g.first },
+  };
+}
+
+// Real sleep for the failure delay, held in a swappable holder so tests can
+// observe requested delays without actually sleeping through the schedule.
+const loginFailureDelay = {
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
 
 // Prevent unbounded growth: periodically drop expired records from both buckets.
 // unref() so this timer never keeps the process alive on its own.
@@ -623,6 +676,16 @@ async function route(req, res) {
     if (attemptBlocked(ipAttempts, ip) || (userKey && attemptBlocked(userAttempts, userKey))) return tooMany();
     recordAttempt(ipAttempts, ip);
     if (userKey) recordAttempt(userAttempts, userKey);
+    // Progressive delay + global throttle, decided from the just-recorded
+    // consecutive-failure counts. Only evaluated failures reach this point,
+    // so a correct password is never delayed or throttled.
+    const ipRec = ipAttempts.get(ip);
+    const userRec = userKey ? userAttempts.get(userKey) : null;
+    const keyFailures = Math.max(ipRec ? ipRec.count : 1, userRec ? userRec.count : 1);
+    const decision = loginThrottleDecision('fail', globalFailures, keyFailures, Date.now());
+    globalFailures = decision.global;
+    if (decision.action === 'throttle') return tooMany();
+    if (decision.delayMs > 0) await loginFailureDelay.sleep(decision.delayMs);
     if (attemptBlocked(ipAttempts, ip) || (userKey && attemptBlocked(userAttempts, userKey))) return tooMany();
     return sendHTML(res, 401, loginPage('Invalid username or password'));
   }
@@ -846,6 +909,8 @@ module.exports = {
   attemptBlocked,
   recordAttempt,
   clearAttempts,
+  loginThrottleDecision,
+  loginFailureDelay,
   isSecure,
   parseCookies,
   setSecurityHeaders,

@@ -15,7 +15,12 @@ process.env.PD_TRUST_PROXY = '1';
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('node:http');
-const { server } = require('../server.js');
+const { server, loginFailureDelay } = require('../server.js');
+
+// Neutralize the progressive failure delay: these tests assert lockout and
+// anti-lockout status codes, not timing (failure-throttle.test.js covers the
+// schedule), so they must not sleep through the real one.
+loginFailureDelay.sleep = async () => {};
 
 let port;
 
