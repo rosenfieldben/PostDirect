@@ -1695,9 +1695,27 @@
   }
 
   // ═══ Status derivation from Lob fields ═══
+  // Lob sends date-only strings for some fields (expected_delivery_date,
+  // send_date). new Date('YYYY-MM-DD') is UTC midnight per spec, which
+  // renders and compares as the PREVIOUS day anywhere west of UTC, so
+  // date-only strings are parsed as local calendar dates via the local-time
+  // constructor. Timestamps (and anything else) pass through to new Date.
+  function parseLobDate(s) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s == null ? '' : s).trim());
+    if (m) {
+      const d = new Date(+m[1], +m[2] - 1, +m[3]);
+      // Round-trip check: the multi-argument constructor never yields Invalid
+      // Date, it rolls out-of-range components over (month 13 becomes next
+      // January) and maps years below 100 into 19xx. Anything that does not
+      // round-trip falls through to new Date(s), keeping the old
+      // Invalid-Date fallback for malformed strings.
+      if (d.getFullYear() === +m[1] && d.getMonth() === +m[2] - 1 && d.getDate() === +m[3]) return d;
+    }
+    return new Date(s);
+  }
   function formatShortDate(s) {
     if (!s) return '';
-    const d = new Date(s);
+    const d = parseLobDate(s);
     if (isNaN(d.getTime())) return s;
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
   }
@@ -1719,9 +1737,9 @@
       return { label: latest.name || 'In progress', variant: 'progress' };
     }
     const now = Date.now();
-    const send = letter.send_date ? new Date(letter.send_date).getTime() : null;
-    const expected = letter.expected_delivery_date ? new Date(letter.expected_delivery_date).getTime() : null;
-    const created = letter.date_sent ? new Date(letter.date_sent).getTime() : null;
+    const send = letter.send_date ? parseLobDate(letter.send_date).getTime() : null;
+    const expected = letter.expected_delivery_date ? parseLobDate(letter.expected_delivery_date).getTime() : null;
+    const created = letter.date_sent ? parseLobDate(letter.date_sent).getTime() : null;
     if (send && send > now + 60000) return { label: 'Scheduled · ' + formatShortDate(letter.send_date), variant: 'muted' };
     if (created && (now - created) < 24 * 3600 * 1000) return { label: 'Processing', variant: 'progress' };
     if (expected && now > expected) return { label: 'Delivered (est.)', variant: 'success' };

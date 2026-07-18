@@ -17,7 +17,7 @@ function fnSrc(name) {
   return SRC.slice(m.index, i);
 }
 const { deriveStatus } =
-  (new Function(fnSrc('formatShortDate') + '\n' + fnSrc('deriveStatus') + '\nreturn { deriveStatus, formatShortDate };'))();
+  (new Function(fnSrc('parseLobDate') + '\n' + fnSrc('formatShortDate') + '\n' + fnSrc('deriveStatus') + '\nreturn { deriveStatus, formatShortDate };'))();
 
 const ev = (name, time) => ({ name, time: time || '2026-06-01T00:00:00Z' });
 const DAY = 24 * 3600 * 1000;
