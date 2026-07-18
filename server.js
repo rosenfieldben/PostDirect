@@ -745,15 +745,48 @@ server.headersTimeout = 30 * 1000;      // headers must arrive within 30s
 server.requestTimeout = 120 * 1000;     // whole request (incl. body) within 120s
 server.keepAliveTimeout = 15 * 1000;    // idle keep-alive sockets close after 15s
 
+// ══════════════════════════════════════════════════════════════
+// STARTUP VALIDATION
+// ══════════════════════════════════════════════════════════════
+// Startup failures are fatal, request failures are not: the per-request
+// catch-all above keeps a RUNNING server alive, but a server that cannot
+// start must exit nonzero, or a supervisor sees a clean exit from a process
+// that never bound its port. Pure function of an env object so tests cover
+// every path without booting a process.
+function validateStartupConfig(env) {
+  const errors = [];
+  const rawPort = env.PORT || '3491';
+  // parseInt (which the PORT constant uses) would accept "80abc" as 80, so
+  // require the whole value to be digits before the range check.
+  if (!/^[0-9]+$/.test(String(rawPort).trim()) || +rawPort < 1 || +rawPort > 65535) {
+    errors.push('PORT must be an integer between 1 and 65535 (got "' + rawPort + '")');
+  }
+  return { ok: errors.length === 0, errors };
+}
+
 // Only bind the port when run directly (`node server.js`); requiring this module
 // (e.g. from tests) must NOT start the server.
 if (require.main === module) {
+  const startup = validateStartupConfig(process.env);
+  if (!startup.ok) {
+    startup.errors.forEach((msg) => console.error('FATAL: ' + msg));
+    process.exit(1);
+  }
   // Last-resort safety net for anything that escapes the per-request try/catch
   // (timers, stream callbacks, native emitters). Log and keep serving rather
   // than let Node's default policy terminate the process. Installed only as the
   // entrypoint so importing the module in tests never swallows their failures.
   process.on('uncaughtException', (e) => console.error('uncaughtException:', e));
   process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e));
+  // A listen failure (EADDRINUSE, EACCES) means the server is not running, and
+  // without this handler it would be swallowed by the uncaughtException net
+  // above and the process would idle out with exit code 0. Attached only as
+  // the entrypoint so tests that listen on an ephemeral port keep node:test's
+  // own failure reporting.
+  server.on('error', (e) => {
+    console.error('FATAL: could not listen on port ' + PORT + ': ' + (e.code || e.message));
+    process.exit(1);
+  });
   server.listen(PORT, () => {
     console.log('');
     console.log('  PostDirect is running');
@@ -816,4 +849,5 @@ module.exports = {
   isSecure,
   parseCookies,
   setSecurityHeaders,
+  validateStartupConfig,
 };
