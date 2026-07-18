@@ -17,17 +17,6 @@ const SESSION_SECRET = process.env.PD_SECRET || crypto.randomBytes(32).toString(
 const COOKIE_NAME = 'pd_session';
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-// Production safety guard: refuse to START with the default/unset password.
-// Gated on require.main so importing this module (e.g. unit tests) never exits;
-// it only fires when run directly as the entrypoint (`node server.js`, including
-// the Docker image which sets NODE_ENV=production). Dev keeps the soft warning
-// printed by server.listen below.
-if (require.main === module && process.env.NODE_ENV === 'production' && (!process.env.PD_PASSWORD || PASSWORD === 'changeme')) {
-  console.error('FATAL: PD_PASSWORD is unset — refusing to start in production with the default password.');
-  console.error('       Set PD_PASSWORD (and PD_USERNAME, PD_SECRET) before deploying.');
-  process.exit(1);
-}
-
 // Optional server-side Lob API key. When set, the browser never needs to see
 // the key: the proxy injects it into any upstream request that doesn't carry
 // its own Authorization header. A key pasted into the UI still wins, so
@@ -824,7 +813,41 @@ function validateStartupConfig(env) {
   if (!/^[0-9]+$/.test(String(rawPort).trim()) || +rawPort < 1 || +rawPort > 65535) {
     errors.push('PORT must be an integer between 1 and 65535 (got "' + rawPort + '")');
   }
-  return { ok: errors.length === 0, errors };
+  // PD_INSECURE_LOCAL_DEMO=1 is the single escape hatch for local demos: it
+  // permits default/weak credentials but forces a loopback-only bind, so the
+  // demo server is never reachable from another machine.
+  const insecureDemo = env.PD_INSECURE_LOCAL_DEMO === '1';
+  if (!insecureDemo) {
+    // These floors apply under EVERY NODE_ENV value, including unset: the old
+    // guard fired only when NODE_ENV was exactly 'production', so a missing
+    // or mistyped NODE_ENV booted a reachable server on admin/changeme.
+    if (!env.PD_USERNAME || env.PD_USERNAME === 'admin') {
+      errors.push('PD_USERNAME is unset or the shipped default ("admin"); set a real username');
+    }
+    if (!env.PD_PASSWORD || env.PD_PASSWORD === 'changeme') {
+      errors.push('PD_PASSWORD is unset or the shipped default ("changeme"); set a real password');
+    } else if (env.PD_PASSWORD.length < 12) {
+      // 12-character floor: credential evaluation is deliberately never gated
+      // on rate-limit state (anti-lockout), so password entropy is the real
+      // barrier against patient online guessing.
+      errors.push('PD_PASSWORD must be at least 12 characters (got ' + env.PD_PASSWORD.length + ')');
+    }
+    if (!env.PD_SECRET) {
+      errors.push('PD_SECRET is unset; set a stable random string (e.g. openssl rand -hex 32)');
+    } else if (env.PD_SECRET.length < 32) {
+      // 32-character floor: PD_SECRET keys the HMAC that makes session
+      // cookies unforgeable, and a short secret makes those signatures
+      // brute-forceable offline.
+      errors.push('PD_SECRET must be at least 32 characters (got ' + env.PD_SECRET.length + ')');
+    }
+  }
+  return {
+    ok: errors.length === 0,
+    errors,
+    insecureDemo,
+    // undefined means "all interfaces" (server.listen's default)
+    host: insecureDemo ? '127.0.0.1' : undefined,
+  };
 }
 
 // Only bind the port when run directly (`node server.js`); requiring this module
@@ -833,6 +856,9 @@ if (require.main === module) {
   const startup = validateStartupConfig(process.env);
   if (!startup.ok) {
     startup.errors.forEach((msg) => console.error('FATAL: ' + msg));
+    if (startup.errors.some((msg) => msg.startsWith('PD_'))) {
+      console.error('       (For a local demo only: PD_INSECURE_LOCAL_DEMO=1 skips the credential checks and binds 127.0.0.1.)');
+    }
     process.exit(1);
   }
   // Last-resort safety net for anything that escapes the per-request try/catch
@@ -850,7 +876,7 @@ if (require.main === module) {
     console.error('FATAL: could not listen on port ' + PORT + ': ' + (e.code || e.message));
     process.exit(1);
   });
-  server.listen(PORT, () => {
+  server.listen(PORT, startup.host, () => {
     console.log('');
     console.log('  PostDirect is running');
     console.log('');
@@ -859,31 +885,22 @@ if (require.main === module) {
     console.log(`     Password: ${'*'.repeat(PASSWORD.length)}`);
     if (LOB_KEY) console.log(`     Lob key:  server-configured (${LOB_KEY_ENV})`);
     console.log('');
+    // The old soft warnings about default/weak credentials are gone: outside
+    // demo mode those conditions are now fatal before listen, so the only
+    // state worth warning about here is demo mode itself.
+    if (startup.insecureDemo) {
+      console.log('  WARNING: PD_INSECURE_LOCAL_DEMO=1: credential checks are OFF.');
+      console.log('     Default/weak credentials are allowed. Bound to 127.0.0.1 ONLY.');
+      console.log('     Never set this flag on a machine other people can reach.');
+      if (!SECRET_FROM_ENV) {
+        console.log('     Sessions use a random per-process secret and reset on every restart.');
+      }
+      console.log('');
+    }
     if (LOB_KEY && !/^(test|live)_/.test(LOB_KEY)) {
       console.log('  WARNING: PD_LOB_KEY does not look like a Lob API key (expected');
       console.log('     it to start with test_ or live_). It will be treated as LIVE.');
       console.log('     Double-check the value.');
-      console.log('');
-    }
-    if (PASSWORD === 'changeme') {
-      console.log('  WARNING: Using default password!');
-      console.log('     Set PD_USERNAME and PD_PASSWORD environment variables.');
-      console.log('');
-    }
-    if (!SECRET_FROM_ENV) {
-      console.log('  WARNING: PD_SECRET is not set — using a random per-process secret.');
-      console.log('     Sessions will NOT survive restarts (every user is logged out on');
-      console.log('     restart). Set PD_SECRET to a stable random string in production.');
-      console.log('');
-    }
-    // Sessions are only as strong as the HMAC key: a short secret makes the
-    // cookie signatures brute-forceable offline. (The random fallback above is
-    // 64 hex chars, so this only fires for an explicitly set weak secret.)
-    if (SECRET_FROM_ENV && SESSION_SECRET.length < 32) {
-      console.log('  WARNING: PD_SECRET is shorter than 32 characters.');
-      console.log('     Session cookies are HMAC-signed with it; a short secret can be');
-      console.log('     brute-forced. Use at least 32 random characters, e.g.');
-      console.log('     openssl rand -hex 32');
       console.log('');
     }
     console.log('  Press Ctrl+C to stop.');

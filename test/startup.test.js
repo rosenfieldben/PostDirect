@@ -17,12 +17,13 @@ const GOOD_ENV = {
   PD_SECRET: 'startup-itest-secret-0123456789abcdef',
 };
 
-// Run `node server.js` with the given env and resolve with its exit code and
-// output. The child either exits on its own (fatal startup error) or reaches
-// onListen output and is killed by the caller via the returned handle.
+// Run `node server.js` with EXACTLY the given env (plus PATH) and resolve
+// with its exit code and output. The env is not merged with GOOD_ENV so tests
+// can boot with credentials genuinely unset. The child either exits on its
+// own (fatal startup error) or is killed by the caller via the returned handle.
 function spawnServer(env) {
   const child = spawn(process.execPath, [SERVER_JS], {
-    env: { ...GOOD_ENV, PATH: process.env.PATH, ...env },
+    env: { PATH: process.env.PATH, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '', stderr = '';
@@ -46,24 +47,24 @@ function freePort() {
 }
 
 test('validateStartupConfig accepts the default and explicit valid ports', () => {
-  assert.strictEqual(validateStartupConfig({}).ok, true, 'unset PORT falls back to the default');
-  assert.strictEqual(validateStartupConfig({ PORT: '' }).ok, true, 'empty PORT falls back to the default');
-  assert.strictEqual(validateStartupConfig({ PORT: '8080' }).ok, true);
-  assert.strictEqual(validateStartupConfig({ PORT: '1' }).ok, true);
-  assert.strictEqual(validateStartupConfig({ PORT: '65535' }).ok, true);
+  assert.strictEqual(validateStartupConfig({ ...GOOD_ENV }).ok, true, 'unset PORT falls back to the default');
+  assert.strictEqual(validateStartupConfig({ ...GOOD_ENV, PORT: '' }).ok, true, 'empty PORT falls back to the default');
+  assert.strictEqual(validateStartupConfig({ ...GOOD_ENV, PORT: '8080' }).ok, true);
+  assert.strictEqual(validateStartupConfig({ ...GOOD_ENV, PORT: '1' }).ok, true);
+  assert.strictEqual(validateStartupConfig({ ...GOOD_ENV, PORT: '65535' }).ok, true);
 });
 
 test('validateStartupConfig rejects non-integer and out-of-range ports', () => {
   for (const bad of ['not-a-port', '0', '65536', '-1', '80abc', '80.5', 'NaN']) {
-    const r = validateStartupConfig({ PORT: bad });
+    const r = validateStartupConfig({ ...GOOD_ENV, PORT: bad });
     assert.strictEqual(r.ok, false, 'PORT=' + JSON.stringify(bad) + ' must be rejected');
     assert.ok(r.errors.some((e) => e.includes('PORT')), 'error names PORT for ' + JSON.stringify(bad));
   }
 });
 
 test('PORT=not-a-port exits nonzero with a clear one-line error', async () => {
-  const { exited } = spawnServer({ PORT: 'not-a-port' });
-  const r = await exited;
+  const r = await expectExit(spawnServer({ ...GOOD_ENV, PORT: 'not-a-port' }), 10000);
+  assert.ok(r, 'server must exit, not boot');
   assert.notStrictEqual(r.code, 0, 'process must not exit 0');
   assert.match(r.stderr(), /FATAL: PORT must be an integer/);
 });
@@ -74,8 +75,8 @@ test('binding an occupied port exits nonzero', async () => {
   const holder = net.createServer();
   const port = await new Promise((resolve) => holder.listen(0, '127.0.0.1', () => resolve(holder.address().port)));
   try {
-    const { exited } = spawnServer({ PORT: String(port) });
-    const r = await exited;
+    const r = await expectExit(spawnServer({ ...GOOD_ENV, PORT: String(port) }), 10000);
+    assert.ok(r, 'server must exit, not boot');
     assert.notStrictEqual(r.code, 0, 'process must not exit 0');
     assert.match(r.stderr(), /FATAL: could not listen on port/);
     assert.match(r.stderr(), /EADDRINUSE/);
@@ -84,25 +85,130 @@ test('binding an occupied port exits nonzero', async () => {
   }
 });
 
+// Wait for the startup banner, bounded. Both timers are cleared on both
+// paths: a timer leaked after rejection would keep this test process alive
+// and hang the whole run instead of reporting the failure.
+function waitForBanner(stdout) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      clearInterval(poll);
+      reject(new Error('server did not start; stdout: ' + stdout()));
+    }, 10000);
+    const poll = setInterval(() => {
+      if (stdout().includes('PostDirect is running')) { clearTimeout(t); clearInterval(poll); resolve(); }
+    }, 50);
+  });
+}
+
+// Bounded wait for a child that SHOULD exit on its own. If a regression made
+// it boot instead, the exited promise would never settle and the suite would
+// hang, so on overrun the child is killed and null is returned for the
+// caller to assert on.
+function expectExit(handle, ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => {
+      handle.child.kill('SIGKILL');
+      handle.exited.then(() => resolve(null));
+    }, ms);
+    handle.exited.then((r) => { clearTimeout(t); resolve(r); });
+  });
+}
+
+function getStatus(host, port) {
+  return new Promise((resolve, reject) => {
+    const req = require('node:http').get({ host, port, path: '/login', timeout: 3000 }, (res) => {
+      res.resume();
+      resolve(res.statusCode);
+    });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+  });
+}
+
 test('valid config binds and serves exactly as before', async () => {
   const port = await freePort();
-  const { child, exited, stdout } = spawnServer({ PORT: String(port) });
+  const { child, exited, stdout } = spawnServer({ ...GOOD_ENV, PORT: String(port) });
   try {
-    // Wait for the startup banner (bounded; the test runner enforces overall time).
-    await new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('server did not start; stdout: ' + stdout())), 10000);
-      const poll = setInterval(() => {
-        if (stdout().includes('PostDirect is running')) { clearTimeout(t); clearInterval(poll); resolve(); }
-      }, 50);
-    });
-    const status = await new Promise((resolve, reject) => {
-      const req = require('node:http').get({ host: '127.0.0.1', port, path: '/login' }, (res) => {
-        res.resume();
-        resolve(res.statusCode);
-      });
-      req.on('error', reject);
-    });
+    await waitForBanner(stdout);
+    const status = await getStatus('127.0.0.1', port);
     assert.strictEqual(status, 200, 'login page served on the validated port');
+  } finally {
+    child.kill('SIGTERM');
+    await exited;
+  }
+});
+
+// ── Credential validation (item 4): applies under EVERY NODE_ENV value ──
+
+test('validateStartupConfig refuses unset or default credentials under any NODE_ENV', () => {
+  for (const nodeEnv of [undefined, 'production', 'development', 'prodcution']) {
+    const env = nodeEnv === undefined ? {} : { NODE_ENV: nodeEnv };
+    const r = validateStartupConfig(env);
+    assert.strictEqual(r.ok, false, 'NODE_ENV=' + JSON.stringify(nodeEnv));
+    for (const name of ['PD_USERNAME', 'PD_PASSWORD', 'PD_SECRET']) {
+      assert.ok(r.errors.some((e) => e.includes(name)), name + ' named under NODE_ENV=' + JSON.stringify(nodeEnv));
+    }
+  }
+});
+
+test('validateStartupConfig refuses each weak or default credential individually', () => {
+  const cases = [
+    [{ ...GOOD_ENV, PD_USERNAME: 'admin' }, 'PD_USERNAME'],
+    [{ ...GOOD_ENV, PD_PASSWORD: 'changeme' }, 'PD_PASSWORD'],
+    [{ ...GOOD_ENV, PD_PASSWORD: 'elevenchars' }, 'at least 12'],
+    [{ ...GOOD_ENV, PD_SECRET: '' }, 'PD_SECRET'],
+    [{ ...GOOD_ENV, PD_SECRET: 'x'.repeat(31) }, 'at least 32'],
+  ];
+  for (const [env, needle] of cases) {
+    const r = validateStartupConfig(env);
+    assert.strictEqual(r.ok, false, JSON.stringify(env));
+    assert.ok(r.errors.some((e) => e.includes(needle)), 'error mentions ' + JSON.stringify(needle));
+  }
+  // The floors, exactly: 12 and 32 characters pass.
+  assert.strictEqual(validateStartupConfig({ ...GOOD_ENV, PD_PASSWORD: 'twelve-chars' }).ok, true);
+  assert.strictEqual(validateStartupConfig({ ...GOOD_ENV, PD_SECRET: 'x'.repeat(32) }).ok, true);
+});
+
+test('PD_INSECURE_LOCAL_DEMO=1 permits defaults but forces a loopback bind', () => {
+  const demo = validateStartupConfig({ PD_INSECURE_LOCAL_DEMO: '1' });
+  assert.strictEqual(demo.ok, true, 'defaults allowed under the demo flag');
+  assert.strictEqual(demo.host, '127.0.0.1', 'demo mode binds loopback only');
+  assert.strictEqual(demo.insecureDemo, true);
+  // A bad PORT is still fatal even in demo mode.
+  assert.strictEqual(validateStartupConfig({ PD_INSECURE_LOCAL_DEMO: '1', PORT: 'nope' }).ok, false);
+  // A normal, strong config binds all interfaces as before.
+  const normal = validateStartupConfig(GOOD_ENV);
+  assert.strictEqual(normal.ok, true);
+  assert.strictEqual(normal.host, undefined);
+});
+
+test('booting on defaults exits nonzero, with and without NODE_ENV=production', async () => {
+  for (const extra of [{}, { NODE_ENV: 'production' }]) {
+    const r = await expectExit(spawnServer(extra), 10000);
+    assert.ok(r, 'server must exit, not boot (env: ' + JSON.stringify(extra) + ')');
+    assert.notStrictEqual(r.code, 0, 'defaults must not boot (env: ' + JSON.stringify(extra) + ')');
+    assert.match(r.stderr(), /FATAL: PD_PASSWORD/);
+    assert.match(r.stderr(), /PD_INSECURE_LOCAL_DEMO/, 'the demo escape hatch is mentioned');
+  }
+});
+
+test('demo flag boots on defaults, warns loudly, and serves on loopback only', async () => {
+  const port = await freePort();
+  const { child, exited, stdout } = spawnServer({ PD_INSECURE_LOCAL_DEMO: '1', PORT: String(port) });
+  try {
+    await waitForBanner(stdout);
+    assert.match(stdout(), /WARNING: PD_INSECURE_LOCAL_DEMO=1/, 'loud startup warning');
+    assert.match(stdout(), /127\.0\.0\.1 ONLY/, 'warning states the loopback bind');
+    assert.strictEqual(await getStatus('127.0.0.1', port), 200, 'serves on loopback');
+    // If this machine has a non-loopback address, the demo server must NOT be
+    // reachable on it (loopback-only bind).
+    const os = require('node:os');
+    const external = Object.values(os.networkInterfaces()).flat()
+      .find((i) => i && i.family === 'IPv4' && !i.internal);
+    if (external) {
+      await assert.rejects(getStatus(external.address, port),
+        'demo server must not listen on ' + external.address);
+    }
   } finally {
     child.kill('SIGTERM');
     await exited;
