@@ -598,6 +598,180 @@ function loginPage(error) {
 }
  
 // ══════════════════════════════════════════════════════════════
+// PERSISTENCE: append-only audit log + content-addressed blobs
+// ══════════════════════════════════════════════════════════════
+// The server was a stateless proxy: nothing about a send survived the process,
+// so the operator could not prove what was sent, when, or with which key
+// environment, and Lob retains mailpiece data for only 90 days. This store is
+// the durable system of record under PD_DATA_DIR:
+//   • audit.log  append-only JSONL, one self-contained event per line, written
+//                with a SYNCHRONOUS append so the line is on disk before the
+//                response that reports it. No line is ever rewritten or deleted.
+//   • blobs/     content-addressed raw bytes at blobs/<sha256hex>, written once.
+// Every store function takes the data directory explicitly (dependency
+// injection), so tests run against a fresh fs.mkdtemp dir. Nothing here runs at
+// module load: the directory is created at the entrypoint (ensureDataDir) or
+// lazily on first write, so REQUIRING this module creates no directories.
+
+// PD_DATA_DIR default lives beside server.js, never inside public/, so it is
+// never web-served (serveStatic only serves STATIC_DIR). Resolved at load time,
+// but this is pure string work: no filesystem touch happens here.
+const DATA_DIR = path.resolve(process.env.PD_DATA_DIR || path.join(__dirname, 'data'));
+const BLOB_RE = /^[0-9a-f]{64}$/;              // ground rule: blob refs are sha256 hex, nothing else
+const LETTER_ID_RE = /^ltr_[A-Za-z0-9]+$/;     // ground rule: Lob letter IDs, before any path/query use
+
+function sha256Hex(buf) {
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
+// Canonical form of a mailing address for correlation hashing: uppercased,
+// whitespace-collapsed, ZIP truncated to its 5-digit prefix (so a ZIP+4 on one
+// side and a bare 5-digit on the other still correlate). Fed by BOTH the
+// us_verifications request (capture) and a letter's recorded recipient
+// (export), so a verification can be matched to a letter without parsing the
+// multipart letter body.
+function normalizeAddressForHash(a) {
+  const norm = (s) => String(s == null ? '' : s).toUpperCase().replace(/\s+/g, ' ').trim();
+  const zip5 = norm(a && a.zip).replace(/[^0-9].*$/, '').slice(0, 5);
+  return [norm(a && a.line1), norm(a && a.line2), norm(a && a.city), norm(a && a.state), zip5].join('|');
+}
+function addressHash(a) { return sha256Hex(normalizeAddressForHash(a)); }
+
+// Create the data directory tree (mode 0700: it holds client PII and mailed
+// documents) and prove it is writable. Returns {ok} or {ok:false, error}. Fatal
+// at startup, and also called lazily by the writers so tests that never boot
+// the entrypoint still work (first-use creation, not module-load).
+function ensureDataDir(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(path.join(dir, 'blobs'), { recursive: true, mode: 0o700 });
+    // Writability probe: mkdir succeeds on a read-only dir when running as root,
+    // so write (then remove) a real file to catch a genuinely unwritable target.
+    const probe = path.join(dir, '.pd-write-test');
+    fs.writeFileSync(probe, '');
+    fs.unlinkSync(probe);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: 'PD_DATA_DIR (' + dir + ') is not usable: ' + (e.code || e.message) };
+  }
+}
+
+// Append one event as a single JSONL line. Synchronous: the line must be on
+// disk before we answer the request that produced it. Stamps ts (ISO 8601 UTC)
+// from the injected clock (Date.now() when omitted). Lazily ensures the dir.
+function auditAppend(dir, event, now) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const line = JSON.stringify(Object.assign(
+    { ts: new Date(now == null ? Date.now() : now).toISOString() }, event)) + '\n';
+  fs.appendFileSync(path.join(dir, 'audit.log'), line);
+  return line;
+}
+
+// Content-addressed write: bytes land at blobs/<sha256hex>, written once with
+// the wx flag so identical content dedupes and an existing blob is never
+// rewritten. Returns the hash.
+function blobStore(dir, buf) {
+  const hex = sha256Hex(buf);
+  const blobsDir = path.join(dir, 'blobs');
+  fs.mkdirSync(blobsDir, { recursive: true, mode: 0o700 });
+  try { fs.writeFileSync(path.join(blobsDir, hex), buf, { flag: 'wx' }); }
+  catch (e) { if (e.code !== 'EEXIST') throw e; }  // identical content already stored: fine
+  return hex;
+}
+
+// Resolve a blob path, refusing any hash that is not exactly 64 hex chars
+// (ground rule: no client-influenced value becomes a filesystem path without
+// strict format validation). Returns null on a bad ref.
+function blobPath(dir, hex) {
+  if (!BLOB_RE.test(String(hex == null ? '' : hex))) return null;
+  return path.join(dir, 'blobs', hex);
+}
+function readBlob(dir, hex) {
+  const p = blobPath(dir, hex);
+  if (!p) return null;
+  try { return fs.readFileSync(p); } catch (e) { return null; }
+}
+
+// Read audit.log into an array of parsed events. A truncated or corrupt final
+// line (e.g. a crash mid-append) is skipped rather than thrown: the log is
+// append-only, so the rest stays readable.
+function auditReadLines(dir) {
+  let raw;
+  try { raw = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8'); }
+  catch (e) { return []; }  // no log yet
+  const out = [];
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    try { out.push(JSON.parse(line)); } catch (e) { /* skip corrupt line */ }
+  }
+  return out;
+}
+
+// Pure filter over parsed events. Linear scan is the right simplicity at
+// solo-operator volume; no index is wanted.
+function auditQuery(lines, predicate) { return lines.filter(predicate); }
+
+// Which upstream calls the proxy captures, keyed by (method, path). Returns the
+// audit event type or null. Only these three are legally consequential.
+function proxyAuditType(method, lobPath) {
+  const p = String(lobPath == null ? '' : lobPath).split('?')[0];
+  if (method === 'POST' && p === '/v1/letters') return 'letter.create';
+  if (method === 'DELETE' && /^\/v1\/letters\/ltr_[A-Za-z0-9]+$/.test(p)) return 'letter.cancel';
+  if (method === 'POST' && p === '/v1/us_verifications') return 'address.verify';
+  return null;
+}
+
+// The key the proxy actually sent upstream lives in a Basic auth header as
+// base64("<key>:"). Decode just enough to classify test/live, then discard: the
+// key itself is never returned, logged, or stored. A missing client header
+// means the server key (PD_LOB_KEY) was injected, so fall back to classifying
+// that.
+function classifyProxyKeyEnv(authHeader) {
+  if (!authHeader) return LOB_KEY_ENV;
+  const m = /^Basic\s+(.+)$/i.exec(String(authHeader));
+  if (!m) return null;
+  try { return lobKeyEnv(Buffer.from(m[1], 'base64').toString('utf8').split(':')[0]); }
+  catch (e) { return null; }
+}
+
+function firstHeader(h) { return (h == null) ? null : String(Array.isArray(h) ? h[0] : h); }
+
+// Build and persist the audit event for a captured proxy call. Writes the blob
+// (letter.create only) BEFORE the log line, so a referenced blob always exists
+// by the time the line naming it is on disk. Never stores Authorization
+// material: only the derived test/live classification.
+function captureProxyEvent(dir, type, lobPath, reqHeaders, upstreamAuth, reqBuf, status, respBuf) {
+  const keyEnv = classifyProxyKeyEnv(upstreamAuth);
+  let response;
+  try { response = JSON.parse(respBuf.toString('utf8')); }
+  catch (e) { response = { _unparsed: respBuf.toString('utf8').slice(0, 4000) }; }
+  if (type === 'letter.create') {
+    const requestBlobSha256 = blobStore(dir, reqBuf);
+    auditAppend(dir, {
+      type,
+      status,
+      letterId: (response && typeof response.id === 'string' && LETTER_ID_RE.test(response.id)) ? response.id : null,
+      requestBlobSha256,
+      requestBytes: reqBuf.length,
+      idempotencyKey: firstHeader(reqHeaders['idempotency-key']),
+      fingerprint: firstHeader(reqHeaders['x-pd-fingerprint']),
+      keyEnv,
+      response,
+    });
+  } else if (type === 'letter.cancel') {
+    const m = /\/v1\/letters\/(ltr_[A-Za-z0-9]+)/.exec(String(lobPath == null ? '' : lobPath).split('?')[0]);
+    auditAppend(dir, { type, status, letterId: m ? m[1] : null, keyEnv, response });
+  } else if (type === 'address.verify') {
+    let addr = null;
+    try {
+      const b = JSON.parse(reqBuf.toString('utf8'));
+      addr = { line1: b.primary_line, line2: b.secondary_line, city: b.city, state: b.state, zip: b.zip_code };
+    } catch (e) { /* unparseable request body: leave addr null */ }
+    auditAppend(dir, { type, status, addressSha256: addr ? addressHash(addr) : null, keyEnv, response });
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
 // REQUEST ROUTER
 // ══════════════════════════════════════════════════════════════
 async function route(req, res) {
@@ -724,12 +898,43 @@ async function route(req, res) {
     // own Authorization header — see lobAuthorization for the precedence.
     const lobAuth = lobAuthorization(options.headers['authorization']);
     if (lobAuth) options.headers['authorization'] = lobAuth;
- 
+    // Legally consequential calls are captured to the durable audit store. These
+    // responses are small JSON, so for them we buffer the upstream response
+    // fully (to record it and, for a create, the request bytes) before
+    // answering the client. Everything else keeps streaming untouched.
+    const auditType = proxyAuditType(req.method, lobPath);
+    const upstreamAuth = options.headers['authorization'];
+
     const proxy = LOB_UPSTREAM.transport.request(options, (lobRes) => {
       // The client may have already disconnected while we waited on Lob; writing
       // to a destroyed response would throw from this async callback (outside the
       // route try/catch) and crash the process. Bail cleanly instead.
       if (res.destroyed) { lobRes.destroy(); return; }
+      if (auditType) {
+        // Buffer, capture (synchronously to disk), then forward the same bytes.
+        const parts = [];
+        lobRes.on('data', (c) => parts.push(c));
+        lobRes.on('end', () => {
+          const respBuf = Buffer.concat(parts);
+          try {
+            captureProxyEvent(DATA_DIR, auditType, lobPath, req.headers, upstreamAuth, bodyBuf, lobRes.statusCode, respBuf);
+          } catch (e) {
+            // A store failure must not sink a send that Lob already accepted, but
+            // it is operationally serious, so log it loudly server-side.
+            console.error('Audit capture failed for ' + auditType + ':', e && (e.code || e.message));
+          }
+          if (res.destroyed) return;
+          res.writeHead(lobRes.statusCode, { 'Content-Type': lobRes.headers['content-type'] || 'application/json' });
+          res.end(respBuf);
+        });
+        lobRes.on('error', (err) => {
+          console.error('Lob proxy stream error:', err.code || err.message);
+          if (!res.headersSent && !res.destroyed) {
+            try { sendJSON(res, 502, { error: { message: 'Upstream request failed' } }); } catch (_) { /* ignore */ }
+          } else { try { res.destroy(); } catch (_) { /* ignore */ } }
+        });
+        return;
+      }
       res.writeHead(lobRes.statusCode, {
         'Content-Type': lobRes.headers['content-type'] || 'application/json',
       });
@@ -861,6 +1066,15 @@ if (require.main === module) {
     }
     process.exit(1);
   }
+  // The audit store is the durable system of record: an unwritable data
+  // directory is a fatal startup error, consistent with Phase 0's principle
+  // that startup failures are fatal (a supervisor must not see success from a
+  // server that cannot record what it sends). Demo mode persists too.
+  const dataCheck = ensureDataDir(DATA_DIR);
+  if (!dataCheck.ok) {
+    console.error('FATAL: ' + dataCheck.error);
+    process.exit(1);
+  }
   // Last-resort safety net for anything that escapes the per-request try/catch
   // (timers, stream callbacks, native emitters). Log and keep serving rather
   // than let Node's default policy terminate the process. Installed only as the
@@ -932,4 +1146,19 @@ module.exports = {
   parseCookies,
   setSecurityHeaders,
   validateStartupConfig,
+  // Persistence / audit store (item 1)
+  DATA_DIR,
+  sha256Hex,
+  normalizeAddressForHash,
+  addressHash,
+  ensureDataDir,
+  auditAppend,
+  blobStore,
+  blobPath,
+  readBlob,
+  auditReadLines,
+  auditQuery,
+  proxyAuditType,
+  classifyProxyKeyEnv,
+  captureProxyEvent,
 };

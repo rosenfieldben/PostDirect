@@ -4,9 +4,11 @@ process.env.PD_SECRET = process.env.PD_SECRET || 'test-secret-fixed-value';
 const test = require('node:test');
 const assert = require('node:assert');
 const net = require('node:net');
+const os = require('node:os');
+const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const { validateStartupConfig } = require('../server.js');
+const { validateStartupConfig, ensureDataDir } = require('../server.js');
 
 const SERVER_JS = path.join(__dirname, '..', 'server.js');
 // Credentials that satisfy startup validation, so the child-process tests
@@ -19,11 +21,13 @@ const GOOD_ENV = {
 
 // Run `node server.js` with EXACTLY the given env (plus PATH) and resolve
 // with its exit code and output. The env is not merged with GOOD_ENV so tests
-// can boot with credentials genuinely unset. The child either exits on its
-// own (fatal startup error) or is killed by the caller via the returned handle.
+// can boot with credentials genuinely unset. A fresh temp PD_DATA_DIR is
+// injected by default (overridable) so a booting child never creates ./data in
+// the repo; a caller can override PD_DATA_DIR to exercise the data-dir check.
 function spawnServer(env) {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pd-startup-'));
   const child = spawn(process.execPath, [SERVER_JS], {
-    env: { PATH: process.env.PATH, ...env },
+    env: { PATH: process.env.PATH, PD_DATA_DIR: dataDir, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '', stderr = '';
@@ -190,6 +194,31 @@ test('booting on defaults exits nonzero, with and without NODE_ENV=production', 
     assert.match(r.stderr(), /FATAL: PD_PASSWORD/);
     assert.match(r.stderr(), /PD_INSECURE_LOCAL_DEMO/, 'the demo escape hatch is mentioned');
   }
+});
+
+// ── Data directory validation (item 1): unwritable PD_DATA_DIR is fatal ──
+
+test('ensureDataDir succeeds on a fresh dir and fails on an unusable one', () => {
+  const ok = ensureDataDir(fs.mkdtempSync(path.join(os.tmpdir(), 'pd-dd-')));
+  assert.strictEqual(ok.ok, true);
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pd-dd-'));
+  const asFile = path.join(base, 'file');
+  fs.writeFileSync(asFile, 'x');
+  const bad = ensureDataDir(path.join(asFile, 'sub')); // parent is a file -> ENOTDIR, uid-independent
+  assert.strictEqual(bad.ok, false);
+  assert.match(bad.error, /not usable/);
+});
+
+test('an unwritable PD_DATA_DIR fails startup nonzero with a clear message', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pd-dd-'));
+  const asFile = path.join(base, 'file');
+  fs.writeFileSync(asFile, 'x');
+  // PD_DATA_DIR whose parent is a regular file: mkdir throws ENOTDIR regardless
+  // of uid (so the check is meaningful even when the test runs as root).
+  const r = await expectExit(spawnServer({ ...GOOD_ENV, PD_DATA_DIR: path.join(asFile, 'data') }), 10000);
+  assert.ok(r, 'server must exit, not boot');
+  assert.notStrictEqual(r.code, 0, 'unwritable data dir must not boot');
+  assert.match(r.stderr(), /FATAL: PD_DATA_DIR/);
 });
 
 test('demo flag boots on defaults, warns loudly, and serves on loopback only', async () => {
