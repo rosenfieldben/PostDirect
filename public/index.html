@@ -1786,7 +1786,10 @@
     }
 
     $('success-results').innerHTML = results.map(r => {
-      const badge = r.success ? '<span class="status-badge success">Mailed</span>' : '<span class="status-badge error">Failed</span>';
+      // "Queued", not "Mailed": a create response only means Lob accepted the
+      // job, not that anything is in the mail yet. The honest label matches the
+      // "Letter Queued" success title.
+      const badge = r.success ? '<span class="status-badge success">Queued</span>' : '<span class="status-badge error">Failed</span>';
       const sub = r.success ? '<div class="result-item-sub">' + esc(r.data.id) + '</div>' : '<div class="result-item-error">' + esc(r.error) + '</div>';
       let track = '';
       if (r.success && isTrackedService(r.data && r.data.extra_service)) {
@@ -1843,6 +1846,12 @@
     if (isNaN(d.getTime())) return s;
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
   }
+  // Honest lifecycle labels. USPS does not confirm final delivery for ordinary
+  // First-Class mail, so the terminal event Lob reports is usually "Processed
+  // for delivery", not a true "Delivered". Two rules follow: labels never
+  // promise more than the event Lob actually reported, and NO success state is
+  // ever inferred from timestamps alone (a create is not "Mailed"; a passed
+  // delivery estimate with no delivery event is unconfirmed, not delivered).
   function deriveStatus(letter) {
     if (letter.fetch_error) return { label: 'Status unavailable', variant: 'muted' };
     if (letter.deleted) return { label: 'Canceled', variant: 'muted' };
@@ -1853,21 +1862,25 @@
       const name = (latest.name || latest.type || '').toLowerCase();
       if (/delivered/.test(name)) return { label: 'Delivered', variant: 'success' };
       if (/returned/.test(name)) return { label: 'Returned', variant: 'error' };
-      if (/processed.*delivery|out for delivery/.test(name)) return { label: 'Out for delivery', variant: 'progress' };
+      // "Processed for delivery" is the strongest confirmation available for
+      // ordinary First-Class mail, so it is the success terminal.
+      if (/processed.*delivery/.test(name)) return { label: 'Processed for delivery', variant: 'success' };
+      if (/out for delivery/.test(name)) return { label: 'Out for delivery', variant: 'progress' };
       if (/re.?routed/.test(name)) return { label: 'Re-routed', variant: 'progress' };
       if (/local area/.test(name)) return { label: 'In local area', variant: 'progress' };
       if (/in.?transit/.test(name)) return { label: 'In transit', variant: 'progress' };
       if (/mailed/.test(name)) return { label: 'Mailed', variant: 'progress' };
       return { label: latest.name || 'In progress', variant: 'progress' };
     }
+    // No tracking events: a future send date is "Scheduled"; a passed delivery
+    // estimate is reported as unconfirmed (never a success); everything else is
+    // simply "Created". No timestamp ever yields a success variant.
     const now = Date.now();
     const send = letter.send_date ? parseLobDate(letter.send_date).getTime() : null;
     const expected = letter.expected_delivery_date ? parseLobDate(letter.expected_delivery_date).getTime() : null;
-    const created = letter.date_sent ? parseLobDate(letter.date_sent).getTime() : null;
     if (send && send > now + 60000) return { label: 'Scheduled · ' + formatShortDate(letter.send_date), variant: 'muted' };
-    if (created && (now - created) < 24 * 3600 * 1000) return { label: 'Processing', variant: 'progress' };
-    if (expected && now > expected) return { label: 'Delivered (est.)', variant: 'success' };
-    return { label: 'In transit', variant: 'progress' };
+    if (expected && now > expected) return { label: 'Expected by ' + formatShortDate(letter.expected_delivery_date) + ', no delivery confirmation', variant: 'muted' };
+    return { label: 'Created', variant: 'progress' };
   }
 
   // ═══ History view ═══
@@ -1902,8 +1915,12 @@
       const status = deriveStatus(h);
       const badge = '<span class="status-badge ' + status.variant + '">' + esc(status.label) + '</span>';
       const metaBits = [];
-      metaBits.push('<span><span class="key">Sent</span> ' + esc(formatShortDate(h.date_sent)) + '</span>');
-      if (h.expected_delivery_date) metaBits.push('<span><span class="key">Expected</span> ' + esc(formatShortDate(h.expected_delivery_date)) + '</span>');
+      // True field names: date_sent is Lob's date_created (see mapLobLetter), so
+      // it is labeled "Created", never "Sent". Send date and expected delivery
+      // are shown under their own names when present.
+      metaBits.push('<span><span class="key">Created</span> ' + esc(formatShortDate(h.date_sent)) + '</span>');
+      if (h.send_date) metaBits.push('<span><span class="key">Send date</span> ' + esc(formatShortDate(h.send_date)) + '</span>');
+      if (h.expected_delivery_date) metaBits.push('<span><span class="key">Expected delivery</span> ' + esc(formatShortDate(h.expected_delivery_date)) + '</span>');
       if (h.mail_type) {
         metaBits.push('<span>' + esc(MAIL_TYPE_LABELS[h.mail_type] || h.mail_type) + '</span>');
       }

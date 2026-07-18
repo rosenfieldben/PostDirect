@@ -67,16 +67,19 @@ test('deriveStatus compares a date-only expected_delivery_date by local calendar
   try {
     process.env.TZ = 'America/New_York';
     assert.ok(new Date(2026, 6, 17).getTimezoneOffset() > 0, 'TZ switch honored');
-    // 2026-07-17T02:00:00Z is 22:00 on July 16 in New York: the letter is due
-    // TOMORROW locally. The old UTC-midnight parse put expected at
-    // 2026-07-17T00:00:00Z, already past, flipping Delivered (est.) a day early.
+    // 2026-07-17T02:00:00Z is 22:00 on July 16 in New York: the expected date is
+    // still in the FUTURE locally. The old UTC-midnight parse put expected at
+    // 2026-07-17T00:00:00Z, already past, which under the item-4 labels would
+    // wrongly flip it to the "no delivery confirmation" (past-estimate) branch.
+    // With the local-calendar parse it stays a plain "Created".
     Date.now = () => Date.parse('2026-07-17T02:00:00Z');
     const status = deriveStatus({
       date_sent: '2026-07-11T12:00:00.000Z',
       expected_delivery_date: '2026-07-17',
     });
-    assert.deepStrictEqual(status, { label: 'In transit', variant: 'progress' },
-      'not yet Delivered (est.) while it is still July 16 locally');
+    assert.deepStrictEqual(status, { label: 'Created', variant: 'progress' },
+      'expected date is still future locally, so it is not yet past-estimate');
+    assert.doesNotMatch(status.label, /no delivery confirmation/);
   } finally {
     Date.now = realNow;
     restoreTz();
