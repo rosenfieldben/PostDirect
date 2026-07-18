@@ -1835,6 +1835,7 @@
             '<div class="letter-card-actions">' +
               badge +
               '<button class="btn-mini" type="button" data-refresh="' + esc(h.id) + '">Refresh</button>' +
+              (LETTER_ID_RE.test(h.id) ? '<button class="btn-mini" type="button" data-proof="' + esc(h.id) + '" title="Download a self-contained evidence bundle (request bytes, Lob response, rendered PDF, tracking, verifications, audit log) as a ZIP.">Export proof</button>' : '') +
               '<button class="btn-mini danger" type="button" data-delete="' + esc(h.id) + '">Remove</button>' +
             '</div>' +
           '</div>' +
@@ -1850,6 +1851,7 @@
 
     list.querySelectorAll('[data-refresh]').forEach(b => b.addEventListener('click', () => refreshOne(b.getAttribute('data-refresh'))));
     list.querySelectorAll('[data-delete]').forEach(b => b.addEventListener('click', () => removeFromHistory(b.getAttribute('data-delete'))));
+    list.querySelectorAll('[data-proof]').forEach(b => b.addEventListener('click', () => exportProof(b.getAttribute('data-proof'), b)));
     list.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copyText(b.getAttribute('data-copy'), b)));
     const moreBtn = $('btn-load-more');
     if (moreBtn) moreBtn.addEventListener('click', () => loadAccountHistory({ reset: false }));
@@ -1861,6 +1863,42 @@
       const envLabel = historyEnv === 'live' ? 'live' : 'test';
       const shown = history.length;
       $('history-last-refreshed').textContent = shown + (historyNextUrl ? '+' : '') + ' ' + envLabel + ' letter' + (shown === 1 ? '' : 's');
+    }
+  }
+
+  // Download the server-assembled evidence bundle for a letter. The endpoint
+  // validates the id server-side too; this guard just avoids offering the
+  // action for a non-letter id (e.g. an optimistic entry mid-send). The proof
+  // is built from the durable audit store, so it works even for a letter Lob
+  // has since aged out of its 90-day window.
+  const LETTER_ID_RE = /^ltr_[A-Za-z0-9]+$/;
+  async function exportProof(id, btn) {
+    if (!LETTER_ID_RE.test(id)) return;
+    const original = btn ? btn.textContent : null;
+    if (btn) { btn.disabled = true; btn.textContent = 'Exporting…'; }
+    try {
+      const resp = await fetch('/api/proof/' + encodeURIComponent(id), { method: 'GET' });
+      if (!resp.ok) {
+        let msg = 'Export failed (HTTP ' + resp.status + ')';
+        try { const j = await resp.json(); if (j && j.error && j.error.message) msg = j.error.message; } catch (e) { /* not json */ }
+        alert(msg);
+        return;
+      }
+      const blob = await resp.blob();
+      // Prefer the server's Content-Disposition filename; fall back to a sane default.
+      let filename = 'proof-' + id + '.zip';
+      const cd = resp.headers.get('Content-Disposition') || '';
+      const m = /filename="([^"]+)"/.exec(cd);
+      if (m) filename = m[1];
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      alert('Export failed: ' + (e.message || 'network error'));
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = original; }
     }
   }
 
