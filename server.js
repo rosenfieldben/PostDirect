@@ -654,6 +654,41 @@ if (require.main === module) {
     console.log('  Press Ctrl+C to stop.');
     console.log('');
   });
+
+  // ── Graceful shutdown (SIGTERM/SIGINT) ──
+  // Stop accepting new connections and let in-flight requests finish, so an
+  // audited send that is mid-capture completes and the durable record is not
+  // lost. The drain is BOUNDED at SHUTDOWN_DRAIN_MS because Phase 1 made
+  // resubmits idempotent: any request we cut off can be safely retried by the
+  // client (Lob de-dupes within its 24h window on the persisted Idempotency-Key),
+  // so a forced termination never risks a duplicate letter. 25s sits just under
+  // the 30s upstream timeout (PROXY_TIMEOUT_MS) and typical orchestrator kill
+  // grace, so a single in-flight Lob round trip has a chance to finish before we
+  // give up.
+  const SHUTDOWN_DRAIN_MS = 25 * 1000;
+  let shuttingDown = false;
+  const gracefulShutdown = (signal) => {
+    if (shuttingDown) {
+      // A second signal means "stop waiting": force an immediate nonzero exit.
+      console.error('FATAL: second ' + signal + ' during shutdown; forcing immediate exit.');
+      process.exit(1);
+    }
+    shuttingDown = true;
+    console.log('Received ' + signal + '; draining in-flight requests (up to ' + (SHUTDOWN_DRAIN_MS / 1000) + 's), no longer accepting new connections.');
+    const timer = setTimeout(() => {
+      server.getConnections((err, count) => {
+        console.error('FATAL: drain timed out after ' + (SHUTDOWN_DRAIN_MS / 1000) + 's with ' +
+          (err ? 'an unknown number of' : count) + ' connection(s) still open; exiting nonzero.');
+        process.exit(1);
+      });
+    }, SHUTDOWN_DRAIN_MS);
+    server.close(() => { clearTimeout(timer); console.log('Drained cleanly; exiting.'); process.exit(0); });
+    // Close idle keep-alive sockets immediately so the drain waits only on ACTIVE
+    // requests, not on connections sitting idle up to keepAliveTimeout.
+    if (server.closeIdleConnections) server.closeIdleConnections();
+  };
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 }
 
 // Exported for unit tests (node:test). Requiring this module does not start the
