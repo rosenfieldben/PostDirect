@@ -9,13 +9,14 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  # 1) Unit + integration suite (node:test) on the supported Node range.
+  unit:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         node: [22, 24]
-    name: Node ${{ matrix.node }}
+    name: Unit (Node ${{ matrix.node }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -24,8 +25,7 @@ jobs:
       # Zero runtime dependencies: the unit suite needs no npm install.
       - run: npm test
 
-  # Browser characterization suite (Playwright, chromium headless). Item 8
-  # expands CI further (adds a docker job and consolidates).
+  # 2) Browser characterization suite (Playwright, chromium headless).
   browser:
     runs-on: ubuntu-latest
     name: Browser (Playwright)
@@ -38,3 +38,67 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
+
+  # 3) Docker image: build, run as the unprivileged user with a temp volume,
+  #    wait for the HEALTHCHECK, prove /login serves, then prove a clean graceful
+  #    stop. Every wait is bounded so a hang fails the job instead of blocking it.
+  docker:
+    runs-on: ubuntu-latest
+    name: Docker (build + run + graceful stop)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t postdirect:ci .
+
+      - name: Run container (temp volume, fast healthcheck override)
+        run: |
+          docker volume create pd-ci-data
+          # Override the healthcheck timing at run time (the Dockerfile keeps the
+          # production 30s interval) so the probe fires quickly in CI. Strong test
+          # credentials satisfy the fatal startup floors; no Lob key is needed.
+          docker run -d --name postdirect-ci \
+            -e PD_USERNAME=ci-user \
+            -e PD_PASSWORD=ci-pass-123456 \
+            -e PD_SECRET=ci-secret-0123456789abcdef0123456789ab \
+            -v pd-ci-data:/app/data \
+            -p 3491:3491 \
+            --health-interval=2s --health-timeout=3s --health-start-period=1s --health-retries=5 \
+            postdirect:ci
+
+      - name: Wait for HEALTHCHECK to report healthy (bounded)
+        run: |
+          for i in $(seq 1 40); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' postdirect-ci 2>/dev/null || echo missing)
+            echo "attempt $i: health=$status"
+            if [ "$status" = "healthy" ]; then exit 0; fi
+            if [ "$status" = "missing" ] || [ "$(docker inspect --format '{{.State.Running}}' postdirect-ci)" != "true" ]; then
+              echo "container is not running:"; docker logs postdirect-ci || true; exit 1
+            fi
+            sleep 1
+          done
+          echo "timed out waiting for healthy"; docker logs postdirect-ci || true; exit 1
+
+      - name: Probe /login returns 200 (bounded)
+        run: |
+          code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://localhost:3491/login)
+          echo "GET /login -> $code"
+          test "$code" = "200"
+
+      - name: Graceful stop exits 0 (exercises SIGTERM shutdown)
+        run: |
+          # docker stop sends SIGTERM; allow ample grace for the drain to finish.
+          docker stop --timeout 30 postdirect-ci
+          code=$(docker inspect --format '{{.State.ExitCode}}' postdirect-ci)
+          echo "container exit code: $code"
+          # Graceful shutdown calls process.exit(0). Without the SIGTERM handler,
+          # Node's default disposition would exit 143 (128+SIGTERM), so 0 proves
+          # the drain ran to a clean finish.
+          docker logs postdirect-ci 2>&1 | tail -n 5 || true
+          test "$code" = "0"
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -f postdirect-ci 2>/dev/null || true
+          docker volume rm pd-ci-data 2>/dev/null || true
