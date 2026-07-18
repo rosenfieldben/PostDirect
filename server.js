@@ -711,6 +711,18 @@ function auditReadLines(dir) {
 // solo-operator volume; no index is wanted.
 function auditQuery(lines, predicate) { return lines.filter(predicate); }
 
+// Prior SUCCESSFUL letter creations for a given client fingerprint, newest
+// concerns last (audit order is chronological). Powers the duplicate warning:
+// the durable server record outlives the client's 24h localStorage window, so
+// a resend months later is still flagged. Returns only what the UI needs, never
+// key material.
+function findSendsByFingerprint(lines, fingerprint) {
+  return auditQuery(lines, (l) =>
+    l.type === 'letter.create' && l.fingerprint === fingerprint &&
+    typeof l.status === 'number' && l.status >= 200 && l.status < 300 && l.letterId
+  ).map((l) => ({ date: l.ts, letterId: l.letterId, keyEnv: l.keyEnv || null }));
+}
+
 // Which upstream calls the proxy captures, keyed by (method, path). Returns the
 // audit event type or null. Only these three are legally consequential.
 function proxyAuditType(method, lobPath) {
@@ -1128,6 +1140,16 @@ async function route(req, res) {
     return sendJSON(res, 200, { server_key: !!LOB_KEY, env: LOB_KEY_ENV });
   }
 
+  // ── Prior sends for a fingerprint (authenticated): powers the duplicate
+  // warning from the durable server record. ──
+  if (pathname === '/api/sends' && req.method === 'GET') {
+    const fp = url.searchParams.get('fingerprint') || '';
+    if (!/^[0-9a-f]{64}$/.test(fp)) {
+      return sendJSON(res, 400, { error: { message: 'Invalid fingerprint' } });
+    }
+    return sendJSON(res, 200, { sends: findSendsByFingerprint(auditReadLines(DATA_DIR), fp) });
+  }
+
   // ── Proof package export (authenticated) ──
   if (pathname.startsWith('/api/proof/') && req.method === 'GET') {
     const letterId = pathname.slice('/api/proof/'.length);
@@ -1458,6 +1480,7 @@ module.exports = {
   readBlob,
   auditReadLines,
   auditQuery,
+  findSendsByFingerprint,
   proxyAuditType,
   classifyProxyKeyEnv,
   captureProxyEvent,

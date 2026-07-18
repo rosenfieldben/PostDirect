@@ -911,14 +911,16 @@
   let recipients = [];  // array of { id, name, company, line1, line2, city, state, zip }
   let nextRecipientId = 1;
   let lastSendResults = null;  // array of { recipient, success, id?, error? }
-  // Per-recipient Lob Idempotency-Key values for the CURRENT compose session.
-  // Lifecycle is the whole point: if a send fails (or the network drops after
-  // Lob accepted it) and the user clicks Mail again, the SAME key is reused for
-  // that recipient, so Lob returns the original letter instead of printing a
-  // duplicate (Lob honors the key for 24 h). On a confirmed success the key is
-  // deleted, so a later intentional re-send to the same person is a new letter,
-  // not a replay. Do not "simplify" this into a fresh key per attempt.
-  const idempotencyKeys = new Map();  // recipient id -> uuid
+  // Durable idempotency: Lob Idempotency-Key values are persisted in
+  // localStorage keyed by a content FINGERPRINT (normalized recipient + shared
+  // options + uploaded-file hash), not by an in-memory recipient id. The old
+  // in-memory Map was discarded on reload/crash/closed-tab, after which
+  // resubmitting the same letter created duplicate physical mail. Now a reload
+  // followed by an identical resubmit reuses the same key within Lob's 24h
+  // window, so Lob de-dupes instead of printing twice. See the persistence
+  // helpers below (getOrCreatePersistedKey, pruneIdempotencyStore).
+  const IDEMPOTENCY_STORE_KEY = 'pd_idempotency_v1';
+  const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // Lob honors an idempotency key for 24 hours
   let history = [];                 // current render model (account-sourced)
   let optimistic = [];              // letters sent this session, shown until the Lob list catches up
   let historyEnv = null;            // 'live' | 'test' of the currently loaded list
@@ -1303,9 +1305,9 @@
   function removeRecipient(id) {
     if (recipients.length <= 1) return;
     recipients = readAllRecipients().filter(r => r.id !== id);
-    // The recipient set changed, so pending retry keys no longer describe the
-    // same send; drop them all rather than risk replaying a stale request.
-    idempotencyKeys.clear();
+    // Idempotency keys are now persisted by content fingerprint, not by
+    // recipient id, so changing the recipient set needs no key housekeeping: a
+    // removed recipient simply is not sent, and its key harmlessly prunes at 24h.
     renderRecipients();
   }
 
@@ -1525,20 +1527,88 @@
     return f;
   }
 
-  // ═══ Send (handles multiple recipients) ═══
-  // Pure helper (unit-tested by extraction): return the recipient's existing
-  // idempotency key, or mint and remember one. Reuse-on-retry is what makes an
-  // ambiguous network failure safe to re-send.
-  function getOrCreateIdempotencyKey(map, id, uuidFn) {
-    let key = map.get(id);
-    if (!key) { key = uuidFn(); map.set(id, key); }
-    return key;
+  // ═══ Durable idempotency + content fingerprint ═══
+  // Canonical string over the normalized recipient, the shared send options,
+  // and the uploaded-file hash. Named + pure so the extraction harness can pin
+  // its stability: sorted keys and trimmed strings mean the SAME logical letter
+  // always produces the SAME string (and therefore the same fingerprint),
+  // regardless of key order or incidental whitespace.
+  function canonicalizeSendInput(recipient, options, fileHashHex) {
+    const trim = (val) => String(val == null ? '' : val).trim();
+    const sortTrim = (obj) => {
+      const out = {};
+      Object.keys(obj || {}).sort().forEach((k) => { out[k] = trim(obj[k]); });
+      return out;
+    };
+    // options may arrive as commonLetterFields' array of [key, value] pairs or
+    // as a plain object; normalize both to a sorted, trimmed object.
+    let optObj = {};
+    if (Array.isArray(options)) options.forEach((pair) => { optObj[pair[0]] = pair[1]; });
+    else optObj = Object.assign({}, options);
+    return JSON.stringify({
+      recipient: sortTrim(recipient || {}),
+      options: sortTrim(optObj),
+      file: String(fileHashHex == null ? '' : fileHashHex),
+    });
   }
+  // SHA-256 hex of a BufferSource via Web Crypto (available in the browser; in
+  // the Node extraction tests the harness injects crypto).
+  async function sha256HexOf(data) {
+    const digest = await crypto.subtle.digest('SHA-256', data);
+    return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  async function computeFingerprint(recipient, options, fileHashHex) {
+    return sha256HexOf(new TextEncoder().encode(canonicalizeSendInput(recipient, options, fileHashHex)));
+  }
+  // Drop entries older than the 24h window (pure). Called on every load so the
+  // store never grows without bound and a stale key is never reused.
+  function pruneIdempotencyStore(store, now) {
+    const out = {};
+    Object.keys(store || {}).forEach((fp) => {
+      const rec = store[fp];
+      if (rec && typeof rec.createdAt === 'number' && (now - rec.createdAt) < IDEMPOTENCY_TTL_MS) out[fp] = rec;
+    });
+    return out;
+  }
+  function loadIdempotencyStore(storage, now) {
+    let parsed = {};
+    try { parsed = JSON.parse(storage.getItem(IDEMPOTENCY_STORE_KEY) || '{}') || {}; } catch (e) { parsed = {}; }
+    return pruneIdempotencyStore(parsed, now);
+  }
+  function saveIdempotencyStore(storage, store) {
+    try { storage.setItem(IDEMPOTENCY_STORE_KEY, JSON.stringify(store)); } catch (e) { /* storage full/unavailable: best effort */ }
+  }
+  // Reuse the persisted key for this fingerprint within the window, or mint and
+  // persist one BEFORE the send fires, so an interrupted send is safe to retry.
+  function getOrCreatePersistedKey(storage, fingerprint, now, uuidFn) {
+    const store = loadIdempotencyStore(storage, now);
+    let rec = store[fingerprint];
+    if (!rec) {
+      rec = { idempotencyKey: uuidFn(), createdAt: now };
+      store[fingerprint] = rec;
+      saveIdempotencyStore(storage, store);
+    }
+    return rec;
+  }
+  // Note the resulting letter id on the persisted record (best effort).
+  function recordSentLetter(storage, fingerprint, letterId, now) {
+    const store = loadIdempotencyStore(storage, now);
+    if (store[fingerprint]) { store[fingerprint].letterId = letterId; saveIdempotencyStore(storage, store); }
+  }
+
+  // ═══ Unload guard while a send is in flight ═══
+  // Leaving mid-batch can make the outcome ambiguous (Lob may have created a
+  // letter whose response we never saw). Warn on navigation while sending; the
+  // persisted key makes a reload-and-resubmit safe, but a warning is still owed.
+  function unloadGuard(e) { e.preventDefault(); e.returnValue = ''; return ''; }
+  function addUnloadGuard() { window.addEventListener('beforeunload', unloadGuard); }
+  function removeUnloadGuard() { window.removeEventListener('beforeunload', unloadGuard); }
 
   // Send the given recipients and return a results array, or null if a
   // pre-flight check failed (in which case an error was surfaced). Callers own
   // presentation (showSuccessView) so a retry can merge with earlier results.
-  async function sendToRecipients(rs) {
+  async function sendToRecipients(rs, opts) {
+    opts = opts || {};
     if (!hasKey()) { showError('Please enter your Lob API key above.'); return null; }
     if (!rs || rs.length === 0) { showError('Add at least one recipient.'); return null; }
     // Belt to the button's suspenders: the send button is disabled while these
@@ -1550,18 +1620,35 @@
     if (!payload) { showError('Letter content is missing.'); return null; }
 
     sending = true; refreshNextBtn(); hideError();
+    addUnloadGuard();
     const common = commonLetterFields();
     const live = isLive();
     const results = [];
 
     try {
+      // One fingerprint per recipient: the uploaded-file hash is shared, so it
+      // is computed once. Fingerprints drive both the duplicate warning and the
+      // persisted idempotency key.
+      const fileHashHex = await sha256HexOf(payload.buffer);
+      const fingerprints = [];
+      for (const to of rs) fingerprints.push(await computeFingerprint(to, common, fileHashHex));
+
+      // Duplicate warning (warn, never block): only for a fresh batch, not a
+      // deliberate "Retry failed". Consults the durable server record, so it
+      // fires even after the 24h client window has pruned the local key.
+      if (opts.warnDuplicates) {
+        const proceed = await confirmDuplicateSends(rs, fingerprints);
+        if (!proceed) return null; // operator cancelled; finally clears state
+      }
+
       for (let i = 0; i < rs.length; i++) {
         const to = rs[i];
+        const fingerprint = fingerprints[i];
         setProgress('Sending letter ' + (i + 1) + ' of ' + rs.length + ' — ' + (to.name || 'recipient'), true);
-        // Reused across retries within this compose session (see idempotencyKeys).
-        // Minted before the try so a build-time throw still records the failure
-        // under the same key, keeping a later retry idempotent.
-        const idemKey = getOrCreateIdempotencyKey(idempotencyKeys, to.id, () => crypto.randomUUID());
+        // Reused across retries AND across reloads: the key is persisted by
+        // fingerprint before the send fires, so an interrupted send is safe to
+        // re-attempt and Lob de-dupes an identical resubmit within 24h.
+        const idemKey = getOrCreatePersistedKey(window.localStorage, fingerprint, Date.now(), () => crypto.randomUUID()).idempotencyKey;
         try {
           // Build inside the try so a build-time throw is recorded as a per-recipient
           // failure rather than escaping the loop and wedging the UI (sending stuck true).
@@ -1569,14 +1656,16 @@
           const { body: mpBody, contentType } = buildMultipart(allFields, payload.buffer, payload.name, payload.mime);
           const resp = await fetch(LOB_BASE + '/v1/letters', {
             method: 'POST',
-            headers: Object.assign({ 'Content-Type': contentType, 'Idempotency-Key': idemKey }, authHeaders()),
+            headers: Object.assign({ 'Content-Type': contentType, 'Idempotency-Key': idemKey, 'X-PD-Fingerprint': fingerprint }, authHeaders()),
             body: mpBody
           });
           const data = await resp.json();
           if (data.error) throw new Error(data.error.message);
-          // Confirmed success: drop the key so a deliberate future send to this
-          // recipient creates a new letter instead of replaying this one.
-          idempotencyKeys.delete(to.id);
+          // Note the letter id on the persisted record (kept, not deleted): an
+          // identical resubmit within 24h reuses the key and Lob returns this
+          // same letter. The durable server record surfaces the duplicate
+          // warning for any resend after that.
+          recordSentLetter(window.localStorage, fingerprint, data.id, Date.now());
           results.push({ recipient: to, success: true, data });
           // Optimistic entry so a freshly sent letter shows immediately. It de-dupes
           // against the Lob list by id the next time History loads (Lob's object wins).
@@ -1604,36 +1693,71 @@
           history.unshift(entry);
           updateHistoryCount();
         } catch (e) {
-          // Key is intentionally NOT deleted here: a failed (possibly ambiguous)
-          // send keeps its key so "Retry failed" reuses it and Lob returns the
-          // original letter instead of printing a duplicate.
+          // The persisted key is intentionally kept on failure: a failed
+          // (possibly ambiguous) send keeps its key so "Retry failed", or even a
+          // reload-and-resubmit, reuses it and Lob returns the original letter
+          // instead of printing a duplicate.
           results.push({ recipient: to, success: false, error: e.message || 'Unknown error' });
         }
       }
     } finally {
       setProgress('', false);
       sending = false;
+      removeUnloadGuard();
+      refreshNextBtn();
     }
     return results;
   }
 
+  // Consult the durable server record for prior sends of each fingerprint and,
+  // on any hit, ask the operator to confirm. Warn, never block: the operator
+  // may legitimately resend (this tool's philosophy is to inform, not refuse,
+  // established by the anti-lockout decision). A network hiccup on the check
+  // never blocks the send. Returns true to proceed, false to cancel.
+  async function confirmDuplicateSends(rs, fingerprints) {
+    const hits = [];
+    for (let i = 0; i < rs.length; i++) {
+      try {
+        const resp = await fetch('/api/sends?fingerprint=' + encodeURIComponent(fingerprints[i]), { method: 'GET' });
+        if (!resp.ok) continue;
+        const j = await resp.json();
+        if (j && Array.isArray(j.sends) && j.sends.length) hits.push({ recipient: rs[i], sends: j.sends });
+      } catch (e) { /* check failed: do not block the send */ }
+    }
+    if (!hits.length) return true;
+    const describe = (h) => {
+      const s = h.sends[h.sends.length - 1];
+      let when = 'a prior date';
+      try { if (s && s.date) when = new Date(s.date).toLocaleString(); } catch (e) { /* keep default */ }
+      const times = h.sends.length > 1 ? (h.sends.length + ' prior sends, most recently ') : 'a prior send ';
+      return '• ' + (h.recipient.name || 'recipient') + ': ' + times + 'on ' + when + ' (' + (s && s.letterId ? s.letterId : 'unknown id') + ')';
+    };
+    return confirm(
+      'Possible duplicate send.\n\n' + hits.map(describe).join('\n') +
+      '\n\nAn identical letter to these recipients was already recorded on this account. ' +
+      'Within 24 hours an identical resubmit is de-duplicated by Lob (the same letter); after that it is a NEW piece of physical mail. ' +
+      'Send anyway?'
+    );
+  }
+
   async function sendLetters() {
     const rs = readAllRecipients();
-    const results = await sendToRecipients(rs);
-    if (!results) return; // pre-flight failed; error already shown
+    const results = await sendToRecipients(rs, { warnDuplicates: true });
+    if (!results) return; // pre-flight failed or cancelled; nothing to show
     lastSendResults = results;
     showSuccessView(results);
   }
 
-  // Re-send ONLY the recipients that failed, reusing their retained idempotency
+  // Re-send ONLY the recipients that failed, reusing their persisted idempotency
   // keys so an ambiguous failure (Lob created the letter but the response was
-  // lost) returns the original letter rather than mailing a duplicate. Prior
-  // successes are preserved and merged back so the view shows the full picture.
+  // lost) returns the original letter rather than mailing a duplicate. This is a
+  // deliberate retry, so the duplicate warning is suppressed. Prior successes are
+  // preserved and merged back so the view shows the full picture.
   async function retryFailed() {
     if (!lastSendResults) return;
     const failed = lastSendResults.filter(r => !r.success).map(r => r.recipient);
     if (failed.length === 0) return;
-    const newResults = await sendToRecipients(failed);
+    const newResults = await sendToRecipients(failed, { warnDuplicates: false });
     if (!newResults) return;
     const byId = new Map(newResults.map(r => [r.recipient.id, r]));
     // Keep original ordering; replace each prior failure with its new outcome.
@@ -2049,8 +2173,9 @@
 
   $('btn-reset').addEventListener('click', () => {
     recipients = [{ id: nextRecipientId++, name: '', company: '', line1: '', line2: '', city: '', state: '', zip: '' }];
-    // New compose session: any retry keys from the previous one are void.
-    idempotencyKeys.clear();
+    // No key housekeeping: persisted idempotency keys are content-addressed by
+    // fingerprint, so a fresh compose that happens to reproduce an identical
+    // letter correctly reuses its key (Lob de-dupes) until the 24h window prunes it.
     renderRecipients();
     $('letter-body').value = '';
     $('opt-color').checked = false; $('opt-double').checked = false; $('opt-return-envelope').checked = false;
