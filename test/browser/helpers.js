@@ -1,5 +1,6 @@
 'use strict';
 const assert = require('node:assert');
+const { expect } = require('@playwright/test');
 
 // Log in through the real form and land on the app. Waits for an app element
 // rather than the 'load' event (which external fonts can stall).
@@ -41,11 +42,14 @@ async function composeToReview(page) {
   await page.fill('#letter-body', 'Dear John, this is a characterization test notice. Sincerely, Jane.');
   await page.click('#btn-next');
   // Step 3: review; wait for verification to settle so the button reads "Mail".
+  // Use web-first locator assertions (not page.waitForFunction): the latter
+  // re-polls its predicate via in-page eval, which the app's CSP (no
+  // 'unsafe-eval') blocks on any poll after the first, making it flaky. Locator
+  // assertions run in Playwright's isolated context and never eval page script.
   await page.waitForSelector('#step-3:not(.is-hidden)');
-  await page.waitForFunction(() => {
-    const b = document.querySelector('#btn-next');
-    return b && /Mail/.test(b.textContent) && !b.disabled;
-  });
+  const mailBtn = page.locator('#btn-next');
+  await expect(mailBtn).toContainText('Mail');
+  await expect(mailBtn).toBeEnabled();
 }
 
 // ── Independent store-only ZIP reader (parses EOCD + central directory and
