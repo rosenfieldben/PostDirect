@@ -1526,8 +1526,13 @@
     const m = String(message == null ? '' : message).toLowerCase();
     const sharedField = /(send_date|send date|mail_type|mail type|extra_service|extra service|use_type|use type|perforated|return_envelope|return envelope|address_placement|address placement|double_sided|double-sided|\bcolor\b)/.test(m);
     if (!sharedField) return false;
-    const recipientSpecific = /\bto\[|\bto\.|\bto:|recipient/.test(m);
-    return !recipientSpecific;
+    // Only a recipient FIELD PATH (to[...] / to....) makes it per-letter. The
+    // bare word "recipient" is NOT enough: Lob may name the recipient in a
+    // shared-option message ("send_date is invalid for recipient X"), and
+    // treating that as per-letter would defeat the halt and collect up to 25
+    // identical failures, the exact case this guards against.
+    const recipientField = /\bto\[|\bto\./.test(m);
+    return !recipientField;
   }
   // Result entries for the recipients AFTER a halt: the shared option they share
   // was rejected on letter (failedIndex+1), so they were never sent. Named +
@@ -1608,6 +1613,20 @@
   async function computeFingerprint(recipient, options, fileHashHex) {
     return sha256HexOf(new TextEncoder().encode(canonicalizeSendInput(recipient, options, fileHashHex)));
   }
+  // Byte-for-byte mirror of server.js normalizeAddressForHash (pinned by a
+  // cross-implementation test). Sent as X-PD-Recipient-Hash on letter creation
+  // so the proof export can correlate a verification (hashed server-side from
+  // the SAME typed address) to this letter without depending on how Lob echoes
+  // the recipient back in its response.
+  function normalizeAddressForHash(a) {
+    const norm = (s) => String(s == null ? '' : s).toUpperCase().replace(/\s+/g, ' ').trim();
+    const zip5 = norm(a && a.zip).replace(/[^0-9].*$/, '').slice(0, 5);
+    return [norm(a && a.line1), norm(a && a.line2), norm(a && a.city), norm(a && a.state), zip5].join('|');
+  }
+  async function computeRecipientHash(to) {
+    return sha256HexOf(new TextEncoder().encode(normalizeAddressForHash(
+      { line1: to.line1, line2: to.line2, city: to.city, state: to.state, zip: to.zip })));
+  }
   // Drop entries older than the 24h window (pure). Called on every load so the
   // store never grows without bound and a stale key is never reused.
   function pruneIdempotencyStore(store, now) {
@@ -1673,18 +1692,27 @@
     if (!sdCheck.ok) { showError(sdCheck.error); return null; }
 
     sending = true; refreshNextBtn(); hideError();
-    addUnloadGuard();
-    const common = commonLetterFields();
-    const live = isLive();
     const results = [];
 
     try {
-      // One fingerprint per recipient: the uploaded-file hash is shared, so it
-      // is computed once. Fingerprints drive both the duplicate warning and the
-      // persisted idempotency key.
+      // Setup inside the try so any throw here (a missing DOM node, or
+      // crypto.subtle being unavailable in a non-secure context) is surfaced as
+      // an error while the finally still clears the sending flag and the unload
+      // guard, instead of rejecting silently and wedging the UI.
+      addUnloadGuard();
+      const common = commonLetterFields();
+      const live = isLive();
+      // One fingerprint + recipient-address hash per recipient; the uploaded-file
+      // hash is shared, so it is computed once. Fingerprints drive the duplicate
+      // warning and the persisted idempotency key; the recipient hash lets the
+      // proof export correlate a verification to this letter.
       const fileHashHex = await sha256HexOf(payload.buffer);
       const fingerprints = [];
-      for (const to of rs) fingerprints.push(await computeFingerprint(to, common, fileHashHex));
+      const recipientHashes = [];
+      for (const to of rs) {
+        fingerprints.push(await computeFingerprint(to, common, fileHashHex));
+        recipientHashes.push(await computeRecipientHash(to));
+      }
 
       // Duplicate warning (warn, never block): only for a fresh batch, not a
       // deliberate "Retry failed". Consults the durable server record, so it
@@ -1709,7 +1737,7 @@
           const { body: mpBody, contentType } = buildMultipart(allFields, payload.buffer, payload.name, payload.mime);
           const resp = await fetch(LOB_BASE + '/v1/letters', {
             method: 'POST',
-            headers: Object.assign({ 'Content-Type': contentType, 'Idempotency-Key': idemKey, 'X-PD-Fingerprint': fingerprint }, authHeaders()),
+            headers: Object.assign({ 'Content-Type': contentType, 'Idempotency-Key': idemKey, 'X-PD-Fingerprint': fingerprint, 'X-PD-Recipient-Hash': recipientHashes[i] }, authHeaders()),
             body: mpBody
           });
           const data = await resp.json();
@@ -1761,6 +1789,14 @@
           }
         }
       }
+    } catch (e) {
+      // An unexpected failure BEFORE or AROUND the per-letter loop (the setup
+      // above, the fingerprint/hash step, or a key mint) would otherwise reject
+      // silently and no-op the send with no feedback. Surface it. Per-letter
+      // send failures are still handled by the inner try/catch and do not reach
+      // here.
+      showError('Could not start the send: ' + (e && e.message ? e.message : 'unexpected error') + '. No letters were sent.');
+      return null;
     } finally {
       setProgress('', false);
       sending = false;

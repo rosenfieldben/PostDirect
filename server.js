@@ -767,6 +767,11 @@ function captureProxyEvent(dir, type, lobPath, reqHeaders, upstreamAuth, reqBuf,
       requestBytes: reqBuf.length,
       idempotencyKey: firstHeader(reqHeaders['idempotency-key']),
       fingerprint: firstHeader(reqHeaders['x-pd-fingerprint']),
+      // Hash of the TYPED recipient address (client mirror of
+      // normalizeAddressForHash). Correlating a verification to a letter by this
+      // is immune to Lob reformatting the recipient in its response, which the
+      // response-derived hash is not; the export prefers this and falls back.
+      recipientSha256: firstHeader(reqHeaders['x-pd-recipient-hash']),
       keyEnv,
       response,
     });
@@ -985,14 +990,19 @@ async function buildProofPackage(dir, letterId, deps) {
   }
 
   // verifications.json: stored address.verify events whose address matches the
-  // recorded recipient (correlated by hash, no multipart parsing). Always
-  // included, possibly empty.
+  // recorded recipient, correlated by hash (no multipart parsing). Two hashes
+  // are accepted so a verification is not silently dropped: the client-sent hash
+  // of the TYPED recipient (recipientSha256, which matches the typed address the
+  // verification also ran on) and, as a fallback for older records or a missing
+  // header, the hash derived from Lob's echoed response `to`. Always included,
+  // possibly empty.
   const to = create && create.response && create.response.to;
-  let recipientHash = null;
+  const recipientHashes = new Set();
+  if (create && create.recipientSha256) recipientHashes.add(create.recipientSha256);
   if (to && typeof to === 'object') {
-    recipientHash = addressHash({ line1: to.address_line1, line2: to.address_line2, city: to.address_city, state: to.address_state, zip: to.address_zip });
+    recipientHashes.add(addressHash({ line1: to.address_line1, line2: to.address_line2, city: to.address_city, state: to.address_state, zip: to.address_zip }));
   }
-  const verifications = lines.filter((l) => l.type === 'address.verify' && recipientHash && l.addressSha256 === recipientHash);
+  const verifications = lines.filter((l) => l.type === 'address.verify' && l.addressSha256 && recipientHashes.has(l.addressSha256));
   addFile('verifications.json', Buffer.from(JSON.stringify(verifications, null, 2)));
 
   // audit.jsonl: every stored line referencing this letter id.

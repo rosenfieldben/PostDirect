@@ -131,7 +131,7 @@ test('captureProxyEvent records a letter.create with a blob and no Authorization
   const dir = tmpDir();
   const reqBuf = Buffer.from('--boundary multipart bytes--');
   const resp = Buffer.from(JSON.stringify({ id: 'ltr_capture1', object: 'letter' }));
-  const reqHeaders = { 'idempotency-key': 'idem-123', 'x-pd-fingerprint': 'f'.repeat(64) };
+  const reqHeaders = { 'idempotency-key': 'idem-123', 'x-pd-fingerprint': 'f'.repeat(64), 'x-pd-recipient-hash': 'a'.repeat(64) };
   const upstreamAuth = 'Basic ' + Buffer.from('live_secretkey:').toString('base64');
   store.captureProxyEvent(dir, 'letter.create', '/v1/letters', reqHeaders, upstreamAuth, reqBuf, 200, resp);
 
@@ -143,6 +143,7 @@ test('captureProxyEvent records a letter.create with a blob and no Authorization
   assert.strictEqual(ev.letterId, 'ltr_capture1');
   assert.strictEqual(ev.idempotencyKey, 'idem-123');
   assert.strictEqual(ev.fingerprint, 'f'.repeat(64));
+  assert.strictEqual(ev.recipientSha256, 'a'.repeat(64), 'X-PD-Recipient-Hash is captured for verification correlation');
   assert.strictEqual(ev.keyEnv, 'live');
   assert.strictEqual(ev.requestBlobSha256, store.sha256Hex(reqBuf));
   assert.strictEqual(ev.requestBytes, reqBuf.length);

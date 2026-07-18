@@ -77,10 +77,19 @@ test('isSharedOptionError: shared-option 422s halt, recipient-specific ones do n
   assert.strictEqual(isSharedOptionError('extra_service certified requires first class mail'), true);
   assert.strictEqual(isSharedOptionError('perforated_page must be 1 when return_envelope is set'), true);
   assert.strictEqual(isSharedOptionError('use_type is required'), true);
-  // Recipient-specific -> false (keep going; only that letter failed).
+  // A shared-option error that ALSO names the recipient still halts: the bare
+  // word "recipient" must not suppress the halt (regression guard for the
+  // false-negative where 25 identical failures would otherwise be collected).
+  assert.strictEqual(isSharedOptionError('send_date is invalid for recipient John Doe'), true);
+  assert.strictEqual(isSharedOptionError('mail_type not allowed for this recipient'), true);
+  // Recipient-specific -> false (keep going; only that letter failed). Only a
+  // to[...] / to.... field path counts as per-letter.
   assert.strictEqual(isSharedOptionError('to.address_line1 is required'), false);
   assert.strictEqual(isSharedOptionError('to[address_zip] is not a valid zip'), false);
   assert.strictEqual(isSharedOptionError('recipient address is undeliverable'), false);
+  // A recipient FIELD error that happens to contain a shared-option word stays
+  // per-letter because it names a to[...] path.
+  assert.strictEqual(isSharedOptionError('to[address_line1] has an invalid color code'), false);
   // Unrelated errors -> false (no halt on an unknown error).
   assert.strictEqual(isSharedOptionError('rate limited, try again'), false);
   assert.strictEqual(isSharedOptionError(''), false);
