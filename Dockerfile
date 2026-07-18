@@ -1,4 +1,8 @@
-FROM node:20-alpine
+# node:24-alpine (Node 24 LTS is the deployment target), pinned by digest so the
+# base cannot float on a mutable tag. Refresh the digest deliberately when
+# bumping Node. Resolve a new one with:
+#   docker manifest inspect node:24-alpine
+FROM node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
 WORKDIR /app
 # Copy with node ownership so the unprivileged runtime user can read the files.
 COPY --chown=node:node package.json ./
