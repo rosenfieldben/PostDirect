@@ -954,7 +954,18 @@
   const apiKey = () => $('api-key-input').value.trim();
   const usingServerKey = () => serverKey && !apiKey();
   const hasKey = () => usingServerKey() || !!apiKey();
-  const isLive = () => usingServerKey() ? serverKeyEnv === 'live' : $('api-key-input').value.startsWith('live_');
+  // Mirror of server.js lobKeyEnv, and the ONLY classifier on this side. It
+  // must see the same trimmed value that authHeaders sends to Lob: classifying
+  // the raw input while sending the trimmed key let " live_..." authenticate
+  // as live while wearing the Test badge. Only test_ means Test; live_ and
+  // unknown prefixes are Live, so an unrecognized key gets the live-mode
+  // confirmation path instead of a reassuring Test badge.
+  function lobKeyEnv(key) {
+    const k = (key == null ? '' : String(key)).trim();
+    if (!k) return null;
+    return k.startsWith('test_') ? 'test' : 'live';
+  }
+  const isLive = () => usingServerKey() ? serverKeyEnv === 'live' : lobKeyEnv(apiKey()) === 'live';
   // Identity of the key History was last loaded with. A unique object
   // sentinel (compared by reference) keeps the server key distinguishable
   // from any pasteable string without embedding a control character in source.
