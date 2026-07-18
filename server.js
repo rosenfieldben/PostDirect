@@ -32,7 +32,7 @@ const {
 
 const {
   ipAttempts, userAttempts,
-  clientIp, ipBucket, bucketKey,
+  clientIp, ipBucket, canonicalizeIp, bucketKey,
   attemptBlocked, recordAttempt, clearAttempts,
   loginThrottleDecision, loginFailureDelay,
 } = require('./lib/ratelimit');
@@ -672,6 +672,7 @@ module.exports = {
   lobKeyEnv,
   clientIp,
   ipBucket,
+  canonicalizeIp,
   bucketKey,
   attemptBlocked,
   recordAttempt,
