@@ -17,17 +17,6 @@ const SESSION_SECRET = process.env.PD_SECRET || crypto.randomBytes(32).toString(
 const COOKIE_NAME = 'pd_session';
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-// Production safety guard: refuse to START with the default/unset password.
-// Gated on require.main so importing this module (e.g. unit tests) never exits;
-// it only fires when run directly as the entrypoint (`node server.js`, including
-// the Docker image which sets NODE_ENV=production). Dev keeps the soft warning
-// printed by server.listen below.
-if (require.main === module && process.env.NODE_ENV === 'production' && (!process.env.PD_PASSWORD || PASSWORD === 'changeme')) {
-  console.error('FATAL: PD_PASSWORD is unset — refusing to start in production with the default password.');
-  console.error('       Set PD_PASSWORD (and PD_USERNAME, PD_SECRET) before deploying.');
-  process.exit(1);
-}
-
 // Optional server-side Lob API key. When set, the browser never needs to see
 // the key: the proxy injects it into any upstream request that doesn't carry
 // its own Authorization header. A key pasted into the UI still wins, so
@@ -73,6 +62,20 @@ const LOGIN_MAX_ATTEMPTS = 5;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;      // 15 minutes
 const BUCKET_KEY_MAX = 256;                  // max chars of a username used as a bucket key
 const ATTEMPT_MAP_MAX = 10000;               // max distinct keys per bucket between sweeps
+// Progressive failure delay, indexed by consecutive failures for a key: the
+// first failure answers immediately, then 0.5s/1s/2s, capped at 4s. The cap
+// keeps a slow-guess response from becoming a socket-holding primitive while
+// still slowing an online guesser by orders of magnitude; a fat-fingered
+// human retyping a password barely notices. Failure responses only: a
+// correct password is never delayed.
+const FAIL_DELAY_SCHEDULE_MS = [0, 500, 1000, 2000, 4000];
+// Global failure throttle: a process-wide ceiling on FAILED attempts per
+// window across ALL bucket keys, so rotating IPs or mangling the username
+// (a fresh bucket key every attempt) cannot buy unlimited tries. 50 per
+// window is far above any legitimate typo rate and far below a useful
+// online guessing rate.
+const GLOBAL_FAIL_MAX = 50;
+const GLOBAL_FAIL_WINDOW_MS = LOGIN_WINDOW_MS; // one window size everywhere
  
 // ══════════════════════════════════════════════════════════════
 // STATELESS SESSIONS — HMAC-signed cookies, no server-side store
@@ -260,6 +263,45 @@ function recordAttempt(map, key) {
 }
 
 function clearAttempts(map, key) { map.delete(key); }
+
+// ── Progressive failure delay + global failure throttle ──
+// Two layers on top of the buckets above. Neither layer ever gates credential
+// evaluation (see the anti-lockout comment in the login route): they only
+// shape how attempts that were ALREADY evaluated as failed are answered.
+let globalFailures = { count: 0, first: 0 };  // process-wide failed-attempt window
+
+// Decide how to answer an evaluated login attempt. Pure: counters go in, the
+// successor global state comes out, and time is the injected now, so unit
+// tests drive the clock and never sleep. keyFailures is the consecutive
+// failure count for this attempt's bucket key INCLUDING this attempt
+// (successes clear the buckets, so a bucket count IS the consecutive-failure
+// count within the window). Returns one of:
+//   { action: 'allow' }     correct password: never delayed, never throttled
+//   { action: 'throttle' }  global ceiling hit: fast uniform 429
+//   { action: 'delay' }     failure: respond after delayMs per the schedule
+function loginThrottleDecision(outcome, global, keyFailures, now) {
+  if (outcome === 'ok') return { action: 'allow', delayMs: 0, global };
+  const g = (global.count > 0 && now - global.first > GLOBAL_FAIL_WINDOW_MS)
+    ? { count: 0, first: 0 }
+    : global;
+  if (g.count >= GLOBAL_FAIL_MAX) {
+    // No delay once tripped: sleeping here would let a flood use the delay
+    // itself to pin open sockets, so the rejection must be fast.
+    return { action: 'throttle', delayMs: 0, global: g };
+  }
+  const idx = Math.min(Math.max(keyFailures, 1), FAIL_DELAY_SCHEDULE_MS.length) - 1;
+  return {
+    action: 'delay',
+    delayMs: FAIL_DELAY_SCHEDULE_MS[idx],
+    global: { count: g.count + 1, first: g.count === 0 ? now : g.first },
+  };
+}
+
+// Real sleep for the failure delay, held in a swappable holder so tests can
+// observe requested delays without actually sleeping through the schedule.
+const loginFailureDelay = {
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
 
 // Prevent unbounded growth: periodically drop expired records from both buckets.
 // unref() so this timer never keeps the process alive on its own.
@@ -623,6 +665,16 @@ async function route(req, res) {
     if (attemptBlocked(ipAttempts, ip) || (userKey && attemptBlocked(userAttempts, userKey))) return tooMany();
     recordAttempt(ipAttempts, ip);
     if (userKey) recordAttempt(userAttempts, userKey);
+    // Progressive delay + global throttle, decided from the just-recorded
+    // consecutive-failure counts. Only evaluated failures reach this point,
+    // so a correct password is never delayed or throttled.
+    const ipRec = ipAttempts.get(ip);
+    const userRec = userKey ? userAttempts.get(userKey) : null;
+    const keyFailures = Math.max(ipRec ? ipRec.count : 1, userRec ? userRec.count : 1);
+    const decision = loginThrottleDecision('fail', globalFailures, keyFailures, Date.now());
+    globalFailures = decision.global;
+    if (decision.action === 'throttle') return tooMany();
+    if (decision.delayMs > 0) await loginFailureDelay.sleep(decision.delayMs);
     if (attemptBlocked(ipAttempts, ip) || (userKey && attemptBlocked(userAttempts, userKey))) return tooMany();
     return sendHTML(res, 401, loginPage('Invalid username or password'));
   }
@@ -745,16 +797,86 @@ server.headersTimeout = 30 * 1000;      // headers must arrive within 30s
 server.requestTimeout = 120 * 1000;     // whole request (incl. body) within 120s
 server.keepAliveTimeout = 15 * 1000;    // idle keep-alive sockets close after 15s
 
+// ══════════════════════════════════════════════════════════════
+// STARTUP VALIDATION
+// ══════════════════════════════════════════════════════════════
+// Startup failures are fatal, request failures are not: the per-request
+// catch-all above keeps a RUNNING server alive, but a server that cannot
+// start must exit nonzero, or a supervisor sees a clean exit from a process
+// that never bound its port. Pure function of an env object so tests cover
+// every path without booting a process.
+function validateStartupConfig(env) {
+  const errors = [];
+  const rawPort = env.PORT || '3491';
+  // parseInt (which the PORT constant uses) would accept "80abc" as 80, so
+  // require the whole value to be digits before the range check.
+  if (!/^[0-9]+$/.test(String(rawPort).trim()) || +rawPort < 1 || +rawPort > 65535) {
+    errors.push('PORT must be an integer between 1 and 65535 (got "' + rawPort + '")');
+  }
+  // PD_INSECURE_LOCAL_DEMO=1 is the single escape hatch for local demos: it
+  // permits default/weak credentials but forces a loopback-only bind, so the
+  // demo server is never reachable from another machine.
+  const insecureDemo = env.PD_INSECURE_LOCAL_DEMO === '1';
+  if (!insecureDemo) {
+    // These floors apply under EVERY NODE_ENV value, including unset: the old
+    // guard fired only when NODE_ENV was exactly 'production', so a missing
+    // or mistyped NODE_ENV booted a reachable server on admin/changeme.
+    if (!env.PD_USERNAME || env.PD_USERNAME === 'admin') {
+      errors.push('PD_USERNAME is unset or the shipped default ("admin"); set a real username');
+    }
+    if (!env.PD_PASSWORD || env.PD_PASSWORD === 'changeme') {
+      errors.push('PD_PASSWORD is unset or the shipped default ("changeme"); set a real password');
+    } else if (env.PD_PASSWORD.length < 12) {
+      // 12-character floor: credential evaluation is deliberately never gated
+      // on rate-limit state (anti-lockout), so password entropy is the real
+      // barrier against patient online guessing.
+      errors.push('PD_PASSWORD must be at least 12 characters (got ' + env.PD_PASSWORD.length + ')');
+    }
+    if (!env.PD_SECRET) {
+      errors.push('PD_SECRET is unset; set a stable random string (e.g. openssl rand -hex 32)');
+    } else if (env.PD_SECRET.length < 32) {
+      // 32-character floor: PD_SECRET keys the HMAC that makes session
+      // cookies unforgeable, and a short secret makes those signatures
+      // brute-forceable offline.
+      errors.push('PD_SECRET must be at least 32 characters (got ' + env.PD_SECRET.length + ')');
+    }
+  }
+  return {
+    ok: errors.length === 0,
+    errors,
+    insecureDemo,
+    // undefined means "all interfaces" (server.listen's default)
+    host: insecureDemo ? '127.0.0.1' : undefined,
+  };
+}
+
 // Only bind the port when run directly (`node server.js`); requiring this module
 // (e.g. from tests) must NOT start the server.
 if (require.main === module) {
+  const startup = validateStartupConfig(process.env);
+  if (!startup.ok) {
+    startup.errors.forEach((msg) => console.error('FATAL: ' + msg));
+    if (startup.errors.some((msg) => msg.startsWith('PD_'))) {
+      console.error('       (For a local demo only: PD_INSECURE_LOCAL_DEMO=1 skips the credential checks and binds 127.0.0.1.)');
+    }
+    process.exit(1);
+  }
   // Last-resort safety net for anything that escapes the per-request try/catch
   // (timers, stream callbacks, native emitters). Log and keep serving rather
   // than let Node's default policy terminate the process. Installed only as the
   // entrypoint so importing the module in tests never swallows their failures.
   process.on('uncaughtException', (e) => console.error('uncaughtException:', e));
   process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e));
-  server.listen(PORT, () => {
+  // A listen failure (EADDRINUSE, EACCES) means the server is not running, and
+  // without this handler it would be swallowed by the uncaughtException net
+  // above and the process would idle out with exit code 0. Attached only as
+  // the entrypoint so tests that listen on an ephemeral port keep node:test's
+  // own failure reporting.
+  server.on('error', (e) => {
+    console.error('FATAL: could not listen on port ' + PORT + ': ' + (e.code || e.message));
+    process.exit(1);
+  });
+  server.listen(PORT, startup.host, () => {
     console.log('');
     console.log('  PostDirect is running');
     console.log('');
@@ -763,31 +885,22 @@ if (require.main === module) {
     console.log(`     Password: ${'*'.repeat(PASSWORD.length)}`);
     if (LOB_KEY) console.log(`     Lob key:  server-configured (${LOB_KEY_ENV})`);
     console.log('');
+    // The old soft warnings about default/weak credentials are gone: outside
+    // demo mode those conditions are now fatal before listen, so the only
+    // state worth warning about here is demo mode itself.
+    if (startup.insecureDemo) {
+      console.log('  WARNING: PD_INSECURE_LOCAL_DEMO=1: credential checks are OFF.');
+      console.log('     Default/weak credentials are allowed. Bound to 127.0.0.1 ONLY.');
+      console.log('     Never set this flag on a machine other people can reach.');
+      if (!SECRET_FROM_ENV) {
+        console.log('     Sessions use a random per-process secret and reset on every restart.');
+      }
+      console.log('');
+    }
     if (LOB_KEY && !/^(test|live)_/.test(LOB_KEY)) {
       console.log('  WARNING: PD_LOB_KEY does not look like a Lob API key (expected');
       console.log('     it to start with test_ or live_). It will be treated as LIVE.');
       console.log('     Double-check the value.');
-      console.log('');
-    }
-    if (PASSWORD === 'changeme') {
-      console.log('  WARNING: Using default password!');
-      console.log('     Set PD_USERNAME and PD_PASSWORD environment variables.');
-      console.log('');
-    }
-    if (!SECRET_FROM_ENV) {
-      console.log('  WARNING: PD_SECRET is not set — using a random per-process secret.');
-      console.log('     Sessions will NOT survive restarts (every user is logged out on');
-      console.log('     restart). Set PD_SECRET to a stable random string in production.');
-      console.log('');
-    }
-    // Sessions are only as strong as the HMAC key: a short secret makes the
-    // cookie signatures brute-forceable offline. (The random fallback above is
-    // 64 hex chars, so this only fires for an explicitly set weak secret.)
-    if (SECRET_FROM_ENV && SESSION_SECRET.length < 32) {
-      console.log('  WARNING: PD_SECRET is shorter than 32 characters.');
-      console.log('     Session cookies are HMAC-signed with it; a short secret can be');
-      console.log('     brute-forced. Use at least 32 random characters, e.g.');
-      console.log('     openssl rand -hex 32');
       console.log('');
     }
     console.log('  Press Ctrl+C to stop.');
@@ -813,7 +926,10 @@ module.exports = {
   attemptBlocked,
   recordAttempt,
   clearAttempts,
+  loginThrottleDecision,
+  loginFailureDelay,
   isSecure,
   parseCookies,
   setSecurityHeaders,
+  validateStartupConfig,
 };

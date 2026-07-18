@@ -21,9 +21,9 @@ Send physical USPS letters from any browser, secured with login authentication.
 1. Push this folder to a GitHub repo
 2. Go to [railway.app](https://railway.app), create a new project → "Deploy from GitHub"
 3. Add environment variables in the Railway dashboard:
-   - `PD_USERNAME` = your chosen username
-   - `PD_PASSWORD` = your chosen password
-   - `PD_SECRET` = any long random string
+   - `PD_USERNAME` = your chosen username (not `admin`)
+   - `PD_PASSWORD` = your chosen password (at least 12 characters)
+   - `PD_SECRET` = a stable random string, at least 32 characters (e.g. `openssl rand -hex 32`)
    - `PD_LOB_KEY` = your Lob API key (optional — otherwise you paste it into the UI)
 4. Railway auto-detects Node.js and deploys. You'll get a public URL like `postdirect-xxxx.up.railway.app`
 
@@ -33,7 +33,7 @@ Send physical USPS letters from any browser, secured with login authentication.
 2. Go to [render.com](https://render.com), New → Web Service → connect your repo
 3. Build command: (leave blank)
 4. Start command: `node server.js`
-5. Add the same environment variables as above — **including `NODE_ENV=production`** so the server refuses to boot on the default password (the guard only fires when `NODE_ENV=production`)
+5. Add the same environment variables as above (the server refuses to boot on unset, default, or too-weak credentials, under every `NODE_ENV` value)
 6. Deploy!
 
 ### Option 3: Any VPS (DigitalOcean, Linode, etc.)
@@ -43,14 +43,12 @@ Send physical USPS letters from any browser, secured with login authentication.
 git clone <your-repo-url> postdirect
 cd postdirect
 
-# Set your credentials
+# Set your credentials. Startup enforces them: username not "admin",
+# password at least 12 characters, secret at least 32 (any NODE_ENV).
 export PD_USERNAME="myusername"
 export PD_PASSWORD="mysecretpassword"
 export PD_SECRET="$(openssl rand -hex 32)"
 export PORT=3491
-# Recommended in production: makes the server refuse to boot on the default
-# password (the fail-fast guard only fires when NODE_ENV=production).
-export NODE_ENV=production
 
 # Run it
 node server.js
@@ -73,16 +71,19 @@ docker run -d -p 3491:3491 \
   postdirect
 ```
 
-The image runs as the non-root `node` user, sets `NODE_ENV=production` (so it will **refuse to boot without `PD_PASSWORD`**), and includes a `HEALTHCHECK` that probes `/login`.
+The image runs as the non-root `node` user and includes a `HEALTHCHECK` that probes `/login`. Like every deployment, it **refuses to boot without real credentials** (`PD_USERNAME`, `PD_PASSWORD`, `PD_SECRET`), regardless of `NODE_ENV`.
 
 ## Local Development
 
 ```bash
-# Set credentials
-export PD_USERNAME="admin"
-export PD_PASSWORD="mypassword"
+# Quickest: demo mode. Allows the default credentials (admin/changeme), but
+# binds 127.0.0.1 only and prints a loud warning. Local demos ONLY.
+PD_INSECURE_LOCAL_DEMO=1 node server.js
 
-# Start
+# Or run exactly like production:
+export PD_USERNAME="myusername"
+export PD_PASSWORD="my-local-password"
+export PD_SECRET="$(openssl rand -hex 32)"
 node server.js
 
 # Open http://localhost:3491
@@ -105,23 +106,23 @@ verdict/correction logic.
 
 | Variable             | Required | Default    | Description                                                                                          |
 |----------------------|----------|------------|------------------------------------------------------------------------------------------------------|
-| `PD_USERNAME`        | Yes      | `admin`    | Login username                                                                                        |
-| `PD_PASSWORD`        | Yes      | `changeme` | Login password                                                                                        |
-| `PD_SECRET`          | Rec.     | (random)   | Secret key used to **sign** session cookies (HMAC-SHA256, nothing is encrypted). Must be a stable random string, or sessions are invalidated on every restart. The server warns at startup if it is shorter than 32 characters. |
+| `PD_USERNAME`        | Yes      | (none)         | Login username. Startup refuses `admin` (the shipped default) and unset, under every `NODE_ENV` value. |
+| `PD_PASSWORD`        | Yes      | (none)         | Login password, at least 12 characters. Startup refuses unset, `changeme`, or shorter values: correct credentials are deliberately never rate-limited (anti-lockout), so password strength is the real barrier against patient online guessing. |
+| `PD_SECRET`          | Yes      | (none)         | Secret key used to **sign** session cookies (HMAC-SHA256, nothing is encrypted), at least 32 characters (e.g. `openssl rand -hex 32`). Startup refuses unset or shorter values, since a short secret makes cookie signatures brute-forceable offline. Must be stable across restarts, or every session is invalidated on restart. |
+| `PD_INSECURE_LOCAL_DEMO` | No   | (none)         | `1` skips the three credential checks above for a LOCAL DEMO ONLY: defaults are allowed, the server binds `127.0.0.1` only, and a loud warning is printed at startup. Never set it on a host other machines can reach. |
 | `PD_LOB_KEY`         | No       | —          | Lob API key held server-side. When set, the proxy injects it into Lob requests that don't carry their own key, so the key never reaches the browser. A key pasted into the UI still overrides it. The UI shows Test/Live based on the key's `test_`/`live_` prefix. |
 | `PD_SECURE_COOKIES`  | No       | (auto)     | `1`/`0` to force the cookie `Secure` flag on/off. Default auto-detects HTTPS via `X-Forwarded-Proto`. |
 | `PD_TRUST_PROXY`     | No       | `0`        | `1`/`true` to derive the client IP for login rate-limiting from the leftmost `X-Forwarded-For` entry. **Enable ONLY behind a trusted reverse proxy** (Railway/Render/nginx); otherwise clients can spoof `X-Forwarded-For` to evade the per-IP limit. |
-| `NODE_ENV`           | No       | —          | When set to `production`, the server **refuses to start** if `PD_PASSWORD` is unset (no silent `changeme` fallback). The Docker image sets this automatically. |
+| `NODE_ENV`           | No       | (none)         | No effect on the credential checks: they apply under every value, including unset. (Earlier versions only enforced them when this was exactly `production`.) |
 | `PORT`               | No       | `3491`     | Server port                                                                                          |
 
 ## Security Notes
 
-- Always change the default password before deploying
+- Startup enforces real credentials under every `NODE_ENV` value: unset or default `PD_USERNAME`/`PD_PASSWORD`, a password shorter than 12 characters, or a `PD_SECRET` shorter than 32 characters all refuse to boot (exit nonzero). `PD_INSECURE_LOCAL_DEMO=1` is the single escape hatch, and it binds `127.0.0.1` only
 - Use HTTPS in production (most cloud hosts provide this automatically)
-- Set a stable `PD_SECRET` in production — sessions are HMAC-signed with it, so a random per-process fallback logs everyone out on each restart (the server warns at startup if it is unset)
+- `PD_SECRET` must be stable across restarts: sessions are HMAC-signed with it, so a changed secret logs everyone out on restart
 - Sessions are stateless signed cookies and expire after 7 days; logout clears the cookie (there is no server-side revocation)
 - Login uses constant-time credential comparison plus rate limiting (5 failed attempts / 15 min) across **two** parallel buckets, per client IP **and** per username, so brute-force and random-username spray are both blunted, even when clients share a source IP behind a proxy (see `PD_TRUST_PROXY`). Credentials are checked **before** either bucket, so the buckets only throttle **failed** attempts and a correct password always logs in — even from an IP whose bucket is full. This matters behind a reverse proxy with `PD_TRUST_PROXY` off, where every client collapses to the proxy's socket IP: an attacker's failures can never lock the real owner (or anyone else with the right password) out. Bucket keys are capped at 256 characters and each bucket at 10,000 entries, bounding attacker-controlled memory between cleanup sweeps; IPv6 sources are keyed by /64 prefix so a single allocation can't mint unlimited buckets
-- In production (`NODE_ENV=production`) the server refuses to start with the default/unset `PD_PASSWORD` — failing fast instead of silently running on `changeme`
 - Every response carries hardening headers: a `Content-Security-Policy` (scripts/styles/connections locked to same-origin + Google Fonts, framing disabled), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer`; HTTPS responses additionally carry `Strict-Transport-Security` (180 days)
 - Frontend output is HTML-escaped including quotes (safe in attribute contexts), and the multipart builder sanitizes header fields (filename, field names) against CRLF/quote injection
 - Request bodies are size-capped (16 KB for login, 52 MB for the Lob proxy) to prevent memory-exhaustion
