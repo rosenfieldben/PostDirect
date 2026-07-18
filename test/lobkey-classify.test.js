@@ -3,24 +3,13 @@ process.env.PD_SECRET = process.env.PD_SECRET || 'test-secret-fixed-value';
 
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('node:fs');
-const path = require('node:path');
 const { lobKeyEnv: serverClassify } = require('../server.js');
 
-// Extract the REAL lobKeyEnv() and isLive from public/index.html and evaluate
-// them, so this suite tests the shipped frontend logic (same brace-matched
-// extraction as derive-status.test.js).
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
-function fnSrc(name) {
-  const m = new RegExp('function\\s+' + name + '\\s*\\(').exec(SRC);
-  if (!m) throw new Error('function not found in index.html: ' + name);
-  let i = SRC.indexOf('{', m.index), depth = 0;
-  for (; i < SRC.length; i++) { const c = SRC[i]; if (c === '{') depth++; else if (c === '}' && --depth === 0) { i++; break; } }
-  return SRC.slice(m.index, i);
-}
-function line(re) { const m = re.exec(SRC); if (!m) throw new Error('not found in index.html: ' + re); return m[0]; }
-const { lobKeyEnv: frontendClassify } =
-  (new Function(fnSrc('lobKeyEnv') + '\nreturn { lobKeyEnv };'))();
+// The server classifier lives in lib/config.js (re-exported by server.js); the
+// frontend classifier is the shipped ES module js/lobkey.mjs. One classifier per
+// side, imported directly so this suite pins the SHIPPED logic on both sides and
+// asserts they agree case-for-case.
+const { lobKeyEnv: frontendClassify } = require('../public/js/lobkey.mjs');
 
 // One classification rule everywhere: a normalized key is Test only if it
 // starts with test_. Anything else, including unknown prefixes, is Live, so a
@@ -52,22 +41,9 @@ test('frontend lobKeyEnv matches the server rule case-for-case', () => {
   }
 });
 
-test('isLive classifies the SAME trimmed value that is sent to Lob', () => {
-  // Evaluate the shipped isLive with its collaborators stubbed the way the
-  // page defines them: apiKey() trims the input, and isLive must classify
-  // that trimmed value (never the raw field).
-  const isLiveSrc = line(/const isLive = [^\n]*;/);
-  const makeIsLive = (rawInput, usingServer, serverEnv) => (new Function(
-    'usingServerKey', 'serverKeyEnv', 'lobKeyEnv', 'apiKey',
-    isLiveSrc + '\nreturn isLive;'
-  ))(() => usingServer, serverEnv, frontendClassify, () => String(rawInput).trim());
-
-  assert.strictEqual(makeIsLive(' live_abc', false, null)(), true,
-    'leading-whitespace live key must display as Live');
-  assert.strictEqual(makeIsLive('sk_abc', false, null)(), true,
-    'unknown prefix must take the live-mode path');
-  assert.strictEqual(makeIsLive('  test_abc  ', false, null)(), false,
-    'whitespace-padded test key still shows Test');
-  assert.strictEqual(makeIsLive('', true, 'live')(), true, 'server key env: live');
-  assert.strictEqual(makeIsLive('', true, 'test')(), false, 'server key env: test');
-});
+// isLive() itself is DOM-coupled app glue (it reads apiKey()/usingServerKey()/
+// serverKeyEnv), so it is not a pure importable module. Its wiring, including the
+// Phase 0 regression that a leading-whitespace " live_" key must display as Live
+// and that an unknown prefix reads as Live, is characterized end-to-end against
+// the real page in test/browser/key-classification.spec.js. The classification
+// rule it delegates to (frontend lobKeyEnv, trimming included) is pinned above.

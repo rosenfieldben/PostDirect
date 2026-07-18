@@ -1,22 +1,19 @@
 'use strict';
 // Fix for review finding #5: confirmDuplicateSends checks every recipient's
 // fingerprint against /api/sends in PARALLEL (was one serial round trip per
-// recipient). Extracted from public/index.html with fetch/confirm injected.
+// recipient). Imported from the shipped js/duplicate.mjs with fetch/confirm stubbed.
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('node:fs');
-const path = require('node:path');
 
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
-function fnSrc(name) {
-  const m = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(').exec(SRC);
-  if (!m) throw new Error('function not found in index.html: ' + name);
-  let i = SRC.indexOf('{', m.index), depth = 0;
-  for (; i < SRC.length; i++) { const c = SRC[i]; if (c === '{') depth++; else if (c === '}' && --depth === 0) { i++; break; } }
-  return SRC.slice(m.index, i);
-}
-const make = (fetchFn, confirmFn) => (new Function('fetch', 'confirm',
-  fnSrc('confirmDuplicateSends') + '\nreturn confirmDuplicateSends;'))(fetchFn, confirmFn);
+// Import the REAL confirmDuplicateSends from the shipped ES module
+// (js/duplicate.mjs). It uses the ambient `fetch` and `confirm` globals (present
+// in the browser); the harness installs stubs on globalThis so the shipped code
+// runs unmodified. Each case sets its own stubs via make(); the originals are
+// restored after the suite so Node's real global fetch is not left overwritten.
+const { confirmDuplicateSends } = require('../public/js/duplicate.mjs');
+const ORIG_FETCH = globalThis.fetch, ORIG_CONFIRM = globalThis.confirm;
+test.after(() => { globalThis.fetch = ORIG_FETCH; globalThis.confirm = ORIG_CONFIRM; });
+const make = (fetchFn, confirmFn) => { globalThis.fetch = fetchFn; globalThis.confirm = confirmFn; return confirmDuplicateSends; };
 
 test('all recipient checks are in flight at once (parallel, not serial)', async () => {
   let inFlight = 0, maxInFlight = 0;

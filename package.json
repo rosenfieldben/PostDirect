@@ -11,9 +11,13 @@
   },
   "scripts": {
     "start": "node server.js",
-    "test": "node --test"
+    "test": "node --test test/*.test.js",
+    "test:browser": "playwright test"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.12"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.53.2"
   }
 }

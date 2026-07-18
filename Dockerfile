@@ -1,8 +1,17 @@
-FROM node:20-alpine
+# node:24-alpine (Node 24 LTS is the deployment target), pinned by digest so the
+# base cannot float on a mutable tag. Refresh the digest deliberately when
+# bumping Node. Resolve a new one with:
+#   docker manifest inspect node:24-alpine
+FROM node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
 WORKDIR /app
 # Copy with node ownership so the unprivileged runtime user can read the files.
+# server.js is the composition root; lib/ holds the modules it requires; public/
+# is the static frontend (index.html + css/ + js/ ES modules). No node_modules:
+# the app has zero runtime dependencies, and the one devDependency (Playwright)
+# is never installed here, so it never ships in the image.
 COPY --chown=node:node package.json ./
 COPY --chown=node:node server.js ./
+COPY --chown=node:node lib/ ./lib/
 COPY --chown=node:node public/ ./public/
 # The durable audit store (PD_DATA_DIR, default /app/data) must be writable by
 # the unprivileged runtime user. Create it node-owned so the default works and

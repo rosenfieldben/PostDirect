@@ -1,21 +1,11 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('node:fs');
-const path = require('node:path');
 
-// Extract the REAL buildMultipart()/mpHeaderSafe() from public/index.html and
-// evaluate them, so this suite tests the shipped code (TextEncoder is a Node global).
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
-function fnSrc(name) {
-  const m = new RegExp('function\\s+' + name + '\\s*\\(').exec(SRC);
-  if (!m) throw new Error('function not found in index.html: ' + name);
-  let i = SRC.indexOf('{', m.index), depth = 0, start = i;
-  for (; i < SRC.length; i++) { const c = SRC[i]; if (c === '{') depth++; else if (c === '}' && --depth === 0) { i++; break; } }
-  return SRC.slice(m.index, i);
-}
-const { buildMultipart, mpHeaderSafe } =
-  (new Function(fnSrc('mpHeaderSafe') + '\n' + fnSrc('buildMultipart') + '\nreturn { buildMultipart, mpHeaderSafe };'))();
+// Import the REAL buildMultipart()/mpHeaderSafe() from the shipped ES module
+// (js/multipart.mjs), so this suite tests the shipped code (TextEncoder is a
+// Node global).
+const { buildMultipart, mpHeaderSafe } = require('../public/js/multipart.mjs');
 
 const decode = buf => Buffer.from(buf).toString('latin1'); // byte-exact for ASCII + binary
 

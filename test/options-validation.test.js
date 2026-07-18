@@ -1,26 +1,15 @@
 'use strict';
-// Item 5: option and schedule validation. Pure client helpers extracted from
-// public/index.html (same brace-matched technique as the other client tests):
+// Item 5: option and schedule validation. Pure client helpers imported directly
+// from the shipped ES module js/options.mjs:
 // validateSendDate, replyMailFields, isSharedOptionError, notAttemptedEntries.
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('node:fs');
-const path = require('node:path');
 
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
-function fnSrc(name) {
-  const m = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(').exec(SRC);
-  if (!m) throw new Error('function not found in index.html: ' + name);
-  let i = SRC.indexOf('{', m.index), depth = 0;
-  for (; i < SRC.length; i++) { const c = SRC[i]; if (c === '{') depth++; else if (c === '}' && --depth === 0) { i++; break; } }
-  return SRC.slice(m.index, i);
-}
-// validateSendDate and the picker share SEND_DATE_MAX_DAYS and use parseLobDate.
-const CONSTS = 'const SEND_DATE_MAX_DAYS = 180;\n';
-const NAMES = ['parseLobDate', 'validateSendDate', 'replyMailFields', 'isSharedOptionError', 'notAttemptedEntries'];
+// Import the REAL option validators from the shipped ES module (js/options.mjs),
+// which itself imports parseLobDate from js/dates.mjs and owns SEND_DATE_MAX_DAYS.
 const {
   validateSendDate, replyMailFields, isSharedOptionError, notAttemptedEntries,
-} = (new Function(CONSTS + NAMES.map(fnSrc).join('\n') + '\nreturn { ' + NAMES.join(', ') + ' };'))();
+} = require('../public/js/options.mjs');
 
 test('validateSendDate: empty is allowed (send immediately)', () => {
   assert.strictEqual(validateSendDate('', '2026-07-18').ok, true);

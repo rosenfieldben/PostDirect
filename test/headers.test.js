@@ -24,7 +24,14 @@ test('CSP allows exactly what the app needs and nothing looser', () => {
   const csp = res.headers['content-security-policy'];
   assert.ok(csp, 'CSP header is set');
   assert.match(csp, /(^|; )default-src 'self'(;|$)/);
-  assert.match(csp, /(^|; )script-src 'self' 'unsafe-inline'(;|$)/);
+  // Item 4 hardening: script-src is 'self' with NO 'unsafe-inline'. All app JS
+  // is external ES modules under /js and neither page carries an inline <script>
+  // or on*= handler, so inline script injection can no longer execute.
+  assert.match(csp, /(^|; )script-src 'self'(;|$)/);
+  assert.ok(!/script-src[^;]*'unsafe-inline'/.test(csp), "script-src must not allow 'unsafe-inline'");
+  // style-src still allows 'unsafe-inline': the login page is served pre-auth and
+  // its stylesheet cannot be an authenticated /css asset, and the app page uses a
+  // few inline style="" attributes.
   assert.match(csp, /(^|; )style-src 'self' 'unsafe-inline' https:\/\/fonts\.googleapis\.com(;|$)/);
   assert.match(csp, /(^|; )font-src https:\/\/fonts\.gstatic\.com(;|$)/);
   assert.match(csp, /(^|; )img-src 'self' data:(;|$)/);

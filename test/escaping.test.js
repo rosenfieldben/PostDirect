@@ -1,17 +1,10 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('node:fs');
-const path = require('node:path');
 
-// Extract the REAL esc()/ESC_MAP source from public/index.html and evaluate it,
-// so this suite tests the shipped code (not a copy). If the source shape changes
-// incompatibly, extraction throws and the suite fails loudly.
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
-function line(re) { const m = re.exec(SRC); if (!m) throw new Error('not found in index.html: ' + re); return m[0]; }
-const escMapSrc = line(/const ESC_MAP = \{[^}]*\};/);
-const escSrc = line(/const esc = s => [^\n]*;/);
-const { esc } = (new Function(escMapSrc + '\n' + escSrc + '\nreturn { esc };'))();
+// Import the REAL esc() from the shipped ES module (js/escape.mjs), so this
+// suite tests the shipped code directly (not a copy).
+const { esc } = require('../public/js/escape.mjs');
 
 test('esc encodes &, <, >, " and \' (from index.html source)', () => {
   assert.strictEqual(esc('&'), '&amp;');

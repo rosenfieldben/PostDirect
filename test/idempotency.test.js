@@ -3,38 +3,21 @@
 // getOrCreateIdempotencyKey helper were REMOVED: they were discarded on
 // reload/crash, after which resubmitting the same letter created duplicate
 // physical mail. This suite now tests the shipped localStorage-backed,
-// fingerprint-keyed persistence and the content canonicalization, extracted
-// from public/index.html (same brace-matched technique as multipart.test.js).
+// fingerprint-keyed persistence and the content canonicalization, imported
+// directly from the shipped ES module js/idempotency.mjs.
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('node:fs');
-const path = require('node:path');
-const crypto = require('node:crypto');
+const crypto = require('node:crypto'); // for an INDEPENDENT expected hash below
 
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
-function fnSrc(name) {
-  // Capture an optional `async ` prefix so async function bodies keep their
-  // keyword (without it, the extracted source has a bare `await` and throws).
-  const m = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(').exec(SRC);
-  if (!m) throw new Error('function not found in index.html: ' + name);
-  let i = SRC.indexOf('{', m.index), depth = 0;
-  for (; i < SRC.length; i++) { const c = SRC[i]; if (c === '{') depth++; else if (c === '}' && --depth === 0) { i++; break; } }
-  return SRC.slice(m.index, i);
-}
-// The persistence + fingerprint functions reference the module-level constants
-// IDEMPOTENCY_STORE_KEY / IDEMPOTENCY_TTL_MS and the global `crypto` (Web
-// Crypto). Provide both to the sandbox: the constants as literals, and Node's
-// webcrypto as `crypto` (so subtle.digest works on Node 18+).
-const CONSTS = "const IDEMPOTENCY_STORE_KEY = 'pd_idempotency_v1';\nconst IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;\n";
-const NAMES = ['canonicalizeSendInput', 'sha256HexOf', 'computeFingerprint', 'pruneIdempotencyStore',
-  'loadIdempotencyStore', 'saveIdempotencyStore', 'getOrCreatePersistedKey', 'recordSentLetter'];
-const api = (new Function('crypto',
-  CONSTS + NAMES.map(fnSrc).join('\n') + '\nreturn { ' + NAMES.join(', ') + ' };'
-))(crypto.webcrypto);
+// Import the shipped idempotency ES module (js/idempotency.mjs). Its fingerprint
+// helpers use the global Web Crypto (crypto.subtle), which Node exposes as
+// globalThis.crypto, and every persistence helper takes localStorage as an
+// explicit parameter (fakeStorage below), so nothing needs to be injected. The
+// IDEMPOTENCY_STORE_KEY / IDEMPOTENCY_TTL_MS constants live inside the module.
 const {
   canonicalizeSendInput, computeFingerprint, pruneIdempotencyStore,
   getOrCreatePersistedKey, recordSentLetter, loadIdempotencyStore,
-} = api;
+} = require('../public/js/idempotency.mjs');
 
 // A minimal localStorage stand-in.
 function fakeStorage(initial) {
