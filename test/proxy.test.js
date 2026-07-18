@@ -125,9 +125,46 @@ test('security headers survive on the proxied response', async () => {
 
 test('upstream failure yields a generic 502 with no internal detail leaked', async () => {
   const cookie = await login();
-  const r = await request({ path: '/api/lob/v1/boom', method: 'GET', headers: { Cookie: cookie } });
+  // Use an ALLOWLISTED path that still trips the stub's connection-drop (its id
+  // contains "boom"), so this exercises the 502 path rather than the 404 gate.
+  const r = await request({ path: '/api/lob/v1/letters/ltr_boom', method: 'GET', headers: { Cookie: cookie } });
   assert.strictEqual(r.status, 502);
   const body = JSON.parse(r.body);
   assert.strictEqual(body.error.message, 'Upstream request failed');
   assert.ok(!/127\.0\.0\.1|ECONNRESET|socket/i.test(r.body), 'no upstream internals leaked to the client');
+});
+
+test('proxy allowlist: disallowed method+path is 404 locally and NEVER forwarded upstream', async () => {
+  const cookie = await login();
+  // Money-moving / financial endpoints the app never uses, plus a wrong method
+  // and a malformed letter id. Each must be answered 404 without the stub
+  // upstream ever seeing the request.
+  const disallowed = [
+    { path: '/api/lob/v1/checks', method: 'GET' },
+    { path: '/api/lob/v1/checks', method: 'POST' },
+    { path: '/api/lob/v1/bank_accounts', method: 'GET' },
+    { path: '/api/lob/v1/bank_accounts', method: 'POST' },
+    { path: '/api/lob/v1/postcards', method: 'POST' },
+    { path: '/api/lob/v1/letters', method: 'PUT' },             // wrong method on an allowed path
+    { path: '/api/lob/v1/letters', method: 'DELETE' },          // cancel needs an id
+    { path: '/api/lob/v1/letters/not-an-id', method: 'GET' },   // id must be ltr_<alnum>
+    { path: '/api/lob/v1/us_verifications', method: 'GET' },    // verify is POST-only
+    { path: '/api/lob/v1/checks?x=/v1/letters', method: 'GET' }, // query cannot smuggle an allowed path
+  ];
+  for (const d of disallowed) {
+    captured = null;
+    const r = await request({ path: d.path, method: d.method, headers: { Cookie: cookie } });
+    assert.strictEqual(r.status, 404, d.method + ' ' + d.path + ' must be 404');
+    assert.strictEqual(captured, null, d.method + ' ' + d.path + ' must NOT reach upstream');
+  }
+});
+
+test('proxy allowlist: DELETE of a well-formed letter id is forwarded (cancel)', async () => {
+  const cookie = await login();
+  captured = null;
+  const r = await request({ path: '/api/lob/v1/letters/ltr_abc123', method: 'DELETE', headers: { Cookie: cookie } });
+  assert.ok(captured, 'cancel reached upstream');
+  assert.strictEqual(captured.method, 'DELETE');
+  assert.strictEqual(captured.url, '/v1/letters/ltr_abc123');
+  assert.strictEqual(r.status, 201, 'stub upstream status passed through');
 });
