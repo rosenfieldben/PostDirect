@@ -129,6 +129,8 @@ test('buildProofPackage: seeded letter yields a valid ZIP with all seven entries
   assert.strictEqual(manifest.keyEnv, 'live');
   assert.strictEqual(manifest.fingerprint, 'f'.repeat(64));
   assert.deepStrictEqual(manifest.missing, [], 'nothing missing on the happy path');
+  assert.strictEqual(manifest.complete, true, 'a full bundle is marked complete');
+  assert.strictEqual(manifest.hasLocalRecord, true, 'the letter.create record is present');
   for (const f of manifest.files) {
     assert.ok(entries[f.name], 'inventory names a real entry: ' + f.name);
     assert.strictEqual(store.sha256Hex(entries[f.name]), f.sha256, 'manifest hash matches ' + f.name);
@@ -164,10 +166,33 @@ test('buildProofPackage: a 404 on the rendered PDF still succeeds and records th
   const miss = manifest.missing.find((m) => m.name === 'rendered.pdf');
   assert.ok(miss, 'manifest records the rendered.pdf miss');
   assert.match(miss.reason, /404/, 'the reason names the status');
+  assert.strictEqual(manifest.complete, false, 'a partial bundle is marked incomplete');
+  assert.strictEqual(manifest.hasLocalRecord, true, 'the local record is still present (only the live PDF is missing)');
   // Everything the manifest DOES list must still hash-match.
   for (const f of manifest.files) {
     assert.strictEqual(store.sha256Hex(entries[f.name]), f.sha256, 'manifest hash matches ' + f.name);
   }
+});
+
+test('buildProofPackage: a letter with NO local record is marked hasLocalRecord=false and incomplete', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pd-proof-nolocal-'));
+  // Never seeded: no letter.create in the store, e.g. a letter created via
+  // another tool but visible in the Lob account. Lob still serves the object.
+  const pkg = await store.buildProofPackage(dir, 'ltr_external1', {
+    now: () => Date.parse('2026-07-18T15:00:00Z'),
+    fetchLetter: async () => ({ ok: true, letter: { id: 'ltr_external1', url: 'https://lob-assets.com/letters/ltr_external1.pdf' } }),
+    fetchAsset: async () => ({ ok: true, bytes: Buffer.from('%PDF external') }),
+  });
+  const manifest = JSON.parse(readZip(pkg.zip)['manifest.json'].toString('utf8'));
+  assert.strictEqual(manifest.hasLocalRecord, false, 'no letter.create record for this id');
+  assert.strictEqual(manifest.complete, false, 'the core request/response are missing');
+  const missNames = manifest.missing.map((m) => m.name);
+  assert.ok(missNames.includes('request-body.bin'), 'request bytes flagged missing');
+  assert.ok(missNames.includes('creation-response.json'), 'creation response flagged missing');
+  // The proof.export audit event carries the same signals.
+  const ev = store.auditReadLines(dir).filter((l) => l.type === 'proof.export').pop();
+  assert.strictEqual(ev.complete, false);
+  assert.strictEqual(ev.hasLocalRecord, false);
 });
 
 // ── Endpoint-level: auth, malformed id, and full wiring through a stub. ──
@@ -244,9 +269,21 @@ test('authenticated export streams a valid ZIP the independent reader accepts', 
   assert.strictEqual(r.status, 200);
   assert.strictEqual(r.headers['content-type'], 'application/zip');
   assert.match(String(r.headers['content-disposition']), /filename="proof-ltr_endpoint1-\d{4}-\d{2}-\d{2}\.zip"/);
+  assert.strictEqual(r.headers['x-pd-proof-complete'], 'true', 'completeness advertised in a header');
+  assert.strictEqual(r.headers['x-pd-proof-has-local-record'], 'true');
   const entries = readZip(r.body);
   assert.ok(entries['manifest.json'] && entries['rendered.pdf'] && entries['request-body.bin']);
   const manifest = JSON.parse(entries['manifest.json'].toString('utf8'));
   assert.strictEqual(manifest.letterId, 'ltr_endpoint1');
   assert.deepStrictEqual(entries['rendered.pdf'], Buffer.from('%PDF endpoint rendered'), 'rendered PDF fetched through the stub');
+});
+
+test('endpoint advertises an incomplete proof in headers when there is no local record', async () => {
+  const cookie = await login();
+  // ltr_endpoint2 has no seeded letter.create; the stub still serves the object.
+  const r = await request({ path: '/api/proof/ltr_endpoint2', method: 'GET', headers: { Cookie: cookie } });
+  assert.strictEqual(r.status, 200, 'a partial proof still downloads');
+  assert.strictEqual(r.headers['x-pd-proof-complete'], 'false');
+  assert.strictEqual(r.headers['x-pd-proof-has-local-record'], 'false');
+  assert.match(String(r.headers['x-pd-proof-missing']), /request-body\.bin/);
 });

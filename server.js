@@ -878,10 +878,18 @@ function zipStore(entries) {
   return Buffer.concat([...locals, cdBuf, eocd]);
 }
 
+// Per-fetch size cap for export-time upstream reads. Generous headroom over the
+// 52 MB proxy body limit (a rendered letter derives from an upload no larger
+// than that), while still bounding a runaway or malformed asset so a single
+// export cannot exhaust memory on the single-process server.
+const PROOF_FETCH_MAX_BYTES = 60 * 1024 * 1024;
+
 // Buffered GET against an explicit target (single configured origin, never
-// client-derived). Resolves (never rejects) so a fetch failure is data, not a
-// thrown error that could sink an export.
-function httpGetBuffer(target) {
+// client-derived), capped at maxBytes (default PROOF_FETCH_MAX_BYTES). Resolves
+// (never rejects) so a fetch failure, timeout, or oversize is data (recorded as
+// a manifest miss), not a thrown error that could sink an export.
+function httpGetBuffer(target, maxBytes) {
+  const cap = (typeof maxBytes === 'number' && maxBytes > 0) ? maxBytes : PROOF_FETCH_MAX_BYTES;
   return new Promise((resolve) => {
     let settled = false;
     const done = (v) => { if (!settled) { settled = true; resolve(v); } };
@@ -890,7 +898,15 @@ function httpGetBuffer(target) {
       headers: target.headers || {},
     }, (r) => {
       const parts = [];
-      r.on('data', (c) => parts.push(c));
+      let total = 0;
+      r.on('data', (c) => {
+        total += c.length;
+        if (total > cap) {
+          r.destroy();
+          return done({ status: 0, buffer: Buffer.alloc(0), error: 'response exceeded ' + cap + ' bytes' });
+        }
+        parts.push(c);
+      });
       r.on('end', () => done({ status: r.statusCode, buffer: Buffer.concat(parts), headers: r.headers }));
       r.on('error', (e) => done({ status: 0, buffer: Buffer.alloc(0), error: e.code || e.message }));
     });
@@ -1030,6 +1046,13 @@ async function buildProofPackage(dir, letterId, deps) {
   const manifest = {
     letterId,
     generatedAt,
+    // Top-level completeness signals so a partial bundle is never mistaken for a
+    // full evidentiary record. hasLocalRecord is false when this letter was not
+    // sent through this app (no letter.create capture), which is the serious
+    // case: the exact request bytes and Lob's creation response are absent.
+    // complete is true only when nothing at all is missing.
+    complete: missing.length === 0,
+    hasLocalRecord: !!create,
     keyEnv: create ? (create.keyEnv || null) : null,
     idempotencyKey: create ? (create.idempotencyKey || null) : null,
     fingerprint: create ? (create.fingerprint || null) : null,
@@ -1044,7 +1067,7 @@ async function buildProofPackage(dir, letterId, deps) {
 
   const zip = zipStore(entries);
   const packageSha256 = sha256Hex(zip);
-  const exportEvent = { type: 'proof.export', letterId, packageSha256, fetched, missing: missing.map((m) => m.name) };
+  const exportEvent = { type: 'proof.export', letterId, packageSha256, complete: missing.length === 0, hasLocalRecord: !!create, fetched, missing: missing.map((m) => m.name) };
   auditAppend(dir, exportEvent, now);
   return { zip, manifest, packageSha256, missing, exportEvent };
 }
@@ -1183,7 +1206,7 @@ async function route(req, res) {
       fetchAsset: async (url) => {
         const t = proxyTargetFor(url);
         if (!t) return { ok: false, error: 'rendered PDF host not allowed' };
-        const r = await httpGetBuffer(t);
+        const r = await httpGetBuffer(t, PROOF_FETCH_MAX_BYTES);
         if (r.status !== 200) return { ok: false, status: r.status, error: r.error };
         return { ok: true, bytes: r.buffer };
       },
@@ -1196,10 +1219,17 @@ async function route(req, res) {
       return;
     }
     const dateStr = new Date().toISOString().slice(0, 10);
+    // Completeness is advertised in headers so the client can warn the operator
+    // that a bundle is partial WITHOUT unzipping it. The values are the same
+    // ones in manifest.json (which remains authoritative). The missing list is
+    // a fixed set of ASCII entry names, safe as a header value.
     res.writeHead(200, {
       'Content-Type': 'application/zip',
       'Content-Disposition': 'attachment; filename="proof-' + letterId + '-' + dateStr + '.zip"',
       'Content-Length': String(pkg.zip.length),
+      'X-PD-Proof-Complete': pkg.manifest.complete ? 'true' : 'false',
+      'X-PD-Proof-Has-Local-Record': pkg.manifest.hasLocalRecord ? 'true' : 'false',
+      'X-PD-Proof-Missing': pkg.missing.map((m) => m.name).join(','),
     });
     return res.end(pkg.zip);
   }
@@ -1499,4 +1529,6 @@ module.exports = {
   zipStore,
   proxyTargetFor,
   buildProofPackage,
+  httpGetBuffer,
+  PROOF_FETCH_MAX_BYTES,
 };

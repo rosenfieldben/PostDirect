@@ -1812,15 +1812,19 @@
   // established by the anti-lockout decision). A network hiccup on the check
   // never blocks the send. Returns true to proceed, false to cancel.
   async function confirmDuplicateSends(rs, fingerprints) {
-    const hits = [];
-    for (let i = 0; i < rs.length; i++) {
+    // Check every recipient's fingerprint in PARALLEL (was one serial round trip
+    // per recipient before the first letter fired). Promise.all preserves order,
+    // so the hits list stays in recipient order.
+    const checks = await Promise.all(rs.map(async (recipient, i) => {
       try {
         const resp = await fetch('/api/sends?fingerprint=' + encodeURIComponent(fingerprints[i]), { method: 'GET' });
-        if (!resp.ok) continue;
+        if (!resp.ok) return null;
         const j = await resp.json();
-        if (j && Array.isArray(j.sends) && j.sends.length) hits.push({ recipient: rs[i], sends: j.sends });
+        if (j && Array.isArray(j.sends) && j.sends.length) return { recipient, sends: j.sends };
       } catch (e) { /* check failed: do not block the send */ }
-    }
+      return null;
+    }));
+    const hits = checks.filter(Boolean);
     if (!hits.length) return true;
     const describe = (h) => {
       const s = h.sends[h.sends.length - 1];
@@ -2126,6 +2130,11 @@
         alert(msg);
         return;
       }
+      // Completeness signals from the server (also in manifest.json), read
+      // before saving so we can warn the operator that a bundle is partial.
+      const complete = resp.headers.get('X-PD-Proof-Complete') === 'true';
+      const hasLocalRecord = resp.headers.get('X-PD-Proof-Has-Local-Record') !== 'false';
+      const missing = (resp.headers.get('X-PD-Proof-Missing') || '').split(',').filter(Boolean);
       const blob = await resp.blob();
       // Prefer the server's Content-Disposition filename; fall back to a sane default.
       let filename = 'proof-' + id + '.zip';
@@ -2137,6 +2146,15 @@
       a.href = url; a.download = filename;
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 1000);
+      // The file still downloads; the warning just makes a partial proof
+      // impossible to mistake for a complete evidentiary record.
+      if (!complete) {
+        const lead = hasLocalRecord
+          ? 'This proof was downloaded, but it is INCOMPLETE.'
+          : 'This proof was downloaded, but this letter has NO local record in this app (it was not sent through PostDirect), so the exact request bytes and Lob’s creation response are not included.';
+        alert(lead + (missing.length ? '\n\nMissing: ' + missing.join(', ') + '.' : '') +
+          '\n\nItems fetched live from Lob are unavailable after Lob’s 90-day window; export sooner to capture them.');
+      }
     } catch (e) {
       alert('Export failed: ' + (e.message || 'network error'));
     } finally {
