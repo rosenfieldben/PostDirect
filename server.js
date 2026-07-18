@@ -113,10 +113,15 @@ function redirect(res, url) {
 // Security headers applied to EVERY response. Set via setHeader() at the top of
 // the request handler so they persist through every later writeHead()/pipe()
 // (writeHead merges with, and only overrides on name collision: none here).
-// The CSP is deliberately permissive enough not to break the app: inline
-// <style>/<script>, Google Fonts (CSS from fonts.googleapis.com + font files
-// from fonts.gstatic.com), data: URIs in CSS, and same-origin fetch to /api/lob.
-const CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'";
+// script-src is 'self' with NO 'unsafe-inline': all app JS is external ES
+// modules under /js, and neither page carries an inline <script> or an on*=
+// handler, so a reflected-XSS injection can no longer execute inline. style-src
+// keeps 'unsafe-inline' deliberately: the login page is served pre-auth and its
+// stylesheet cannot be an authenticated /css asset, and the app page still uses
+// a few inline style="" attributes. Google Fonts (CSS from fonts.googleapis.com
+// + font files from fonts.gstatic.com), data: URIs in CSS, and same-origin
+// fetch to /api/lob remain allowed.
+const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'";
 function setSecurityHeaders(res) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -128,7 +133,7 @@ function setSecurityHeaders(res) {
 // STATIC FILES
 // ══════════════════════════════════════════════════════════════
 const STATIC_DIR = path.join(__dirname, 'public');
-const MIME_TYPES = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
+const MIME_TYPES = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.mjs': 'application/javascript', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
 
 function serveStatic(res, filePath) {
   const full = path.join(STATIC_DIR, filePath);

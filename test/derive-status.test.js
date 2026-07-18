@@ -1,23 +1,12 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('node:fs');
-const path = require('node:path');
 
-// Extract the REAL deriveStatus()/formatShortDate() from public/index.html and
-// evaluate them, so this suite tests the shipped logic. deriveStatus reads the
-// real Date.now() internally, so the date-based branches use dates expressed
-// RELATIVE to Date.now() (consistent to within test runtime).
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
-function fnSrc(name) {
-  const m = new RegExp('function\\s+' + name + '\\s*\\(').exec(SRC);
-  if (!m) throw new Error('function not found in index.html: ' + name);
-  let i = SRC.indexOf('{', m.index), depth = 0;
-  for (; i < SRC.length; i++) { const c = SRC[i]; if (c === '{') depth++; else if (c === '}' && --depth === 0) { i++; break; } }
-  return SRC.slice(m.index, i);
-}
-const { deriveStatus } =
-  (new Function(fnSrc('parseLobDate') + '\n' + fnSrc('formatShortDate') + '\n' + fnSrc('deriveStatus') + '\nreturn { deriveStatus, formatShortDate };'))();
+// Import the REAL deriveStatus() from the shipped ES module (js/dates.mjs), so
+// this suite tests the shipped logic directly. deriveStatus reads the real
+// Date.now() internally, so the date-based branches use dates expressed RELATIVE
+// to Date.now() (consistent to within test runtime).
+const { deriveStatus } = require('../public/js/dates.mjs');
 
 const ev = (name, time) => ({ name, time: time || '2026-06-01T00:00:00Z' });
 const DAY = 24 * 3600 * 1000;

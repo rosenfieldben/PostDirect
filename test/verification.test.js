@@ -1,22 +1,10 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('node:fs');
-const path = require('node:path');
 
-// Extract the REAL verificationVerdict()/correctedAddress() from
-// public/index.html and evaluate them, so this suite tests the shipped logic
-// (same extraction pattern as derive-status.test.js).
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
-function fnSrc(name) {
-  const m = new RegExp('function\\s+' + name + '\\s*\\(').exec(SRC);
-  if (!m) throw new Error('function not found in index.html: ' + name);
-  let i = SRC.indexOf('{', m.index), depth = 0;
-  for (; i < SRC.length; i++) { const c = SRC[i]; if (c === '{') depth++; else if (c === '}' && --depth === 0) { i++; break; } }
-  return SRC.slice(m.index, i);
-}
-const { verificationVerdict, correctedAddress } =
-  (new Function(fnSrc('verificationVerdict') + '\n' + fnSrc('correctedAddress') + '\nreturn { verificationVerdict, correctedAddress };'))();
+// Import the REAL verificationVerdict()/correctedAddress() from the shipped ES
+// module (js/address.mjs), so this suite tests the shipped logic directly.
+const { verificationVerdict, correctedAddress } = require('../public/js/address.mjs');
 
 test('verdict: each Lob deliverability value maps to the right level', () => {
   assert.strictEqual(verificationVerdict({ deliverability: 'deliverable' }).level, 'ok');

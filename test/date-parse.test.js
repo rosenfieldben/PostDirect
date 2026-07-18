@@ -5,23 +5,11 @@
 // rendered the previous day.
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('node:fs');
-const path = require('node:path');
 
-// Extract the REAL parseLobDate()/formatShortDate() from public/index.html and
-// evaluate them, so this suite tests the shipped logic (same brace-matched
-// extraction as derive-status.test.js).
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
-function fnSrc(name) {
-  const m = new RegExp('function\\s+' + name + '\\s*\\(').exec(SRC);
-  if (!m) throw new Error('function not found in index.html: ' + name);
-  let i = SRC.indexOf('{', m.index), depth = 0;
-  for (; i < SRC.length; i++) { const c = SRC[i]; if (c === '{') depth++; else if (c === '}' && --depth === 0) { i++; break; } }
-  return SRC.slice(m.index, i);
-}
-const { parseLobDate, formatShortDate, deriveStatus } =
-  (new Function(fnSrc('parseLobDate') + '\n' + fnSrc('formatShortDate') + '\n' + fnSrc('deriveStatus') +
-    '\nreturn { parseLobDate, formatShortDate, deriveStatus };'))();
+// Import the REAL parseLobDate()/formatShortDate()/deriveStatus() from the
+// shipped ES module (js/dates.mjs), so this suite tests the shipped logic
+// directly.
+const { parseLobDate, formatShortDate, deriveStatus } = require('../public/js/dates.mjs');
 
 const ORIGINAL_TZ = process.env.TZ;
 function restoreTz() {

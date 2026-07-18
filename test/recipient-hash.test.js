@@ -18,17 +18,9 @@ const test = require('node:test');
 const assert = require('node:assert');
 const store = require('../server.js');
 
-// Extract the client normalizeAddressForHash from index.html and evaluate it.
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
-function fnSrc(name) {
-  const m = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(').exec(SRC);
-  if (!m) throw new Error('function not found in index.html: ' + name);
-  let i = SRC.indexOf('{', m.index), depth = 0;
-  for (; i < SRC.length; i++) { const c = SRC[i]; if (c === '{') depth++; else if (c === '}' && --depth === 0) { i++; break; } }
-  return SRC.slice(m.index, i);
-}
-const { normalizeAddressForHash: clientNormalize } =
-  (new Function(fnSrc('normalizeAddressForHash') + '\nreturn { normalizeAddressForHash };'))();
+// Import the client normalizeAddressForHash from the shipped ES module
+// (js/address.mjs) and compare it, byte-for-byte, against the server's.
+const { normalizeAddressForHash: clientNormalize } = require('../public/js/address.mjs');
 
 // Minimal store-only ZIP entry extractor (independent of server.js's writer):
 // scan the central directory for `name`, then read its stored bytes.
