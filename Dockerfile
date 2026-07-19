@@ -1,8 +1,14 @@
-# node:24-alpine (Node 24 LTS is the deployment target), pinned by digest so the
-# base cannot float on a mutable tag. Refresh the digest deliberately when
-# bumping Node. Resolve a new one with:
-#   docker manifest inspect node:24-alpine
-FROM node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
+# node:24-alpine (Node 24 LTS is the deployment target). Pulled by TAG, NOT by
+# an @sha256 digest: Railway's builder cannot resolve a digest-pinned multi-arch
+# base and aborts image resolution in ~3s with no output. The same Dockerfile
+# builds cleanly in GitHub Actions and the digest is valid/current on Docker Hub,
+# so this is a Railway builder constraint, not a bad digest. Re-pinning by digest
+# WILL break the Railway deploy — keep this a tag unless/until Railway fixes
+# digest-by-pin pulls. Floating the official tag also picks up base security
+# patches, which suits this security-sensitive, zero-runtime-dependency app.
+# For the record, on 2026-07-19 this tag resolved to the multi-arch index:
+#   sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
+FROM node:24-alpine
 WORKDIR /app
 # Copy with node ownership so the unprivileged runtime user can read the files.
 # server.js is the composition root; lib/ holds the modules it requires; public/
