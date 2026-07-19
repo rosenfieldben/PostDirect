@@ -14,13 +14,15 @@
 <div class="app">
   <header class="masthead-pad">
     <div class="masthead">
-      <div class="masthead-row" role="tablist" aria-label="Views">
+      <div class="masthead-row">
         <div class="brand">
           <span class="brand-stamp" aria-hidden="true"><span class="brand-stamp-inner">PD</span></span>
           <span class="brand-wordmark">PostDirect</span>
         </div>
-        <button class="nav-link active" id="view-compose-tab" type="button" role="tab" aria-selected="true" aria-controls="view-compose" tabindex="0">Compose</button>
-        <button class="nav-link" id="view-history-tab" type="button" role="tab" aria-selected="false" aria-controls="view-history" tabindex="-1">History <span class="count">(<span id="history-count">0</span>)</span></button>
+        <nav class="masthead-tabs" role="tablist" aria-label="Views">
+          <button class="nav-link active" id="view-compose-tab" type="button" role="tab" aria-selected="true" aria-controls="view-compose" tabindex="0">Compose</button>
+          <button class="nav-link" id="view-history-tab" type="button" role="tab" aria-selected="false" aria-controls="view-history" tabindex="-1">History <span class="count">(<span id="history-count">0</span>)</span></button>
+        </nav>
         <span class="tag tag-neutral" id="env-badge"><span id="env-note-pre">Proof&nbsp;press&nbsp;·&nbsp;</span><span id="env-label">Test</span><span id="env-note-post"></span></span>
         <form method="POST" action="/logout" class="sign-out-form"><button type="submit" class="sign-out">Sign out</button></form>
       </div>
@@ -106,7 +108,7 @@
           <div class="form-grid cols-2">
             <div class="field">
               <label>Mail class</label>
-              <div class="seg" id="opt-mail-type-seg">
+              <div class="seg" id="opt-mail-type-seg" role="radiogroup" aria-label="Mail class">
                 <label class="seg-opt"><input type="radio" name="opt-mail-type" value="usps_first_class" checked />First Class</label>
                 <label class="seg-opt"><input type="radio" name="opt-mail-type" value="usps_standard" />Standard</label>
               </div>
@@ -127,7 +129,7 @@
             </div>
             <div class="field">
               <label>Use type</label>
-              <div class="seg" id="opt-use-type-seg">
+              <div class="seg" id="opt-use-type-seg" role="radiogroup" aria-label="Use type">
                 <label class="seg-opt"><input type="radio" name="opt-use-type" value="operational" checked />Operational</label>
                 <label class="seg-opt"><input type="radio" name="opt-use-type" value="marketing" />Marketing</label>
               </div>
@@ -153,7 +155,7 @@
             </div>
           </div>
           <div class="checks-row">
-            <label class="check-label"><input type="checkbox" id="opt-color" /> Color printing</label>
+            <label class="check-label"><input type="checkbox" id="opt-color" checked /> Color printing</label>
             <label class="check-label"><input type="checkbox" id="opt-double" /> Double-sided</label>
             <label class="check-label" title="Lob requires a return envelope to ride a perforated first page, so the two are set together."><input type="checkbox" id="opt-reply-envelope" /> Reply envelope — adds a perforated first page</label>
           </div>

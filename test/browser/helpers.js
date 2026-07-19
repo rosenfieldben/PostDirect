@@ -10,6 +10,10 @@ async function login(page, app) {
   await page.fill('#password', app.creds.password);
   await page.click('button[type=submit]');
   await page.waitForSelector('#api-key-input', { timeout: 15000 });
+  // The app module sets data-app-ready once it has wired events and painted the
+  // first step. Waiting on it (rather than a fixed timeout) closes the race where
+  // the suite drives the wizard before the module finished initializing.
+  await page.waitForSelector('body[data-app-ready="true"]', { timeout: 15000 });
 }
 
 // Recipient inputs carry a dynamic id (r-<n>-...), and n increments after each

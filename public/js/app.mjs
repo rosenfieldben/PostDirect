@@ -182,6 +182,26 @@ import { confirmDuplicateSends } from './duplicate.mjs';
   const expandedIds = new Set();
   let historyFetchedAt = null;
 
+  // Copy-to-clipboard with a graceful, dependency-free fallback. Restored for
+  // the tracking-number Copy buttons (a long certified/registered number is
+  // pasted into case records; drag-select is error-prone and keyboard-hostile).
+  function copyText(text, btn) {
+    const flash = () => { if (btn) { const o = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = o; }, 1200); } };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(flash).catch(() => fallbackCopy(text, flash));
+    } else { fallbackCopy(text, flash); }
+  }
+  function fallbackCopy(text, done) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); document.body.removeChild(ta);
+      if (done) done();
+    } catch (e) { /* clipboard unavailable; no-op */ }
+  }
+
   function verifyCacheKey(r) {
     // Prefixed with the key environment: test keys return fixture data, so a
     // verdict cached under a test key must not be reused once a live key is in.
@@ -240,7 +260,12 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     }
     tagEl.className = 'tag ' + (VERIFY_TAG[result.level] || 'tag-neutral');
     tagEl.textContent = result.label;
-    let html = '';
+    // Always seed the live region with the verdict label. A clean "ok" verdict
+    // carries no note, so without this the aria-live region would be emptied and
+    // announce nothing — the result of the address check would be inaudible to a
+    // screen-reader user. The visually-hidden line names the outcome; any note or
+    // USPS suggestion follows.
+    let html = '<span class="sr-only">Verification: ' + esc(result.label) + '.</span>';
     if (result.note) html += '<div class="verify-note' + (result.level === 'blocked' ? ' blocked' : '') + '">' + esc(result.note) + '</div>';
     // Offer the standardized form only for sendable verdicts: for an
     // undeliverable address a "correction" to the same bad address is noise.
@@ -800,9 +825,11 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     const live = isLive();
     const n = results.length;
 
-    // Kicker: "Accepted · 2 of 2" in cyan; magenta when anything failed.
+    // Kicker: "Accepted · 2 of 2" in cyan; magenta when anything failed. When
+    // nothing was accepted, "Accepted · 0 of N" reads as a contradiction, so the
+    // total-failure case gets its own honest phrasing.
     const kicker = $('success-kicker');
-    kicker.textContent = 'Accepted · ' + ok + ' of ' + n;
+    kicker.textContent = (ok === 0 ? 'None accepted · 0 of ' : 'Accepted · ' + ok + ' of ') + n;
     kicker.classList.toggle('partial', fail > 0);
 
     const mailClass = MAIL_TYPE_LABELS[segGet('opt-mail-type')] || 'First Class';
@@ -835,7 +862,8 @@ import { confirmDuplicateSends } from './duplicate.mjs';
       else if (isTrackedService(r.data && r.data.extra_service)) {
         const tn = r.data && r.data.tracking_number;
         if (tn && live) {
-          notes = '<div class="result-note">Tracking <a href="' + esc(uspsTrackingUrl(tn)) + '" target="_blank" rel="noopener">' + esc(tn) + '</a></div>';
+          notes = '<div class="result-note">Tracking <a href="' + esc(uspsTrackingUrl(tn)) + '" target="_blank" rel="noopener">' + esc(tn) + '</a>' +
+            ' <button class="linklike tracking-copy" type="button" data-copy="' + esc(tn) + '">Copy</button></div>';
         } else if (live) {
           notes = '<div class="result-note">Tracking number appears in the record once USPS assigns it (up to ~3 business days).</div>';
         } else {
@@ -850,10 +878,11 @@ import { confirmDuplicateSends } from './duplicate.mjs';
       '</tr>';
     }).join('');
     $('success-results').innerHTML =
-      '<table class="table success-table">' +
+      '<div class="table-scroll"><table class="table success-table">' +
         '<thead><tr><th style="width:44%">Recipient</th><th>Letter №</th><th>Status</th></tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
-      '</table>';
+      '</table></div>';
+    $('success-results').querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copyText(b.getAttribute('data-copy'), b)));
     // Offer an idempotency-preserving retry only when something failed.
     const retryBtn = $('btn-retry-failed');
     if (retryBtn) retryBtn.style.display = fail > 0 ? '' : 'none';
@@ -869,19 +898,23 @@ import { confirmDuplicateSends } from './duplicate.mjs';
   // ones (the two inline SVGs specified by the handoff).
   const DOT_LATEST = '<svg width="13" height="13" viewBox="0 0 256 256" aria-hidden="true"><circle cx="128" cy="128" r="100" fill="#0088b0" opacity="0.2"></circle><circle cx="128" cy="128" r="48" fill="#0088b0"></circle></svg>';
   const DOT_EARLIER = '<svg width="13" height="13" viewBox="0 0 256 256" aria-hidden="true"><circle cx="128" cy="128" r="100" fill="#0088b0" opacity="0.2"></circle></svg>';
+  // Chevron for the per-row disclosure button; CSS rotates it when expanded.
+  const CHEVRON = '<svg width="12" height="8" viewBox="0 0 12 8" fill="none" aria-hidden="true"><path d="M1 1.5l5 5 5-5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   function formatEventTime(s) {
-    const d = new Date(s || 0);
+    // Guard the falsy case FIRST: new Date(0) is a valid Date (the Unix epoch),
+    // so `new Date(s || 0)` would render "Jan 1, 12:00 AM" for a missing time
+    // instead of an empty string.
+    if (!s) return '';
+    const d = new Date(s);
     if (isNaN(d.getTime())) return '';
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ', ' +
       d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   }
-  // The "Mailed" column: the scheduled date for a letter still ahead of its
-  // send date, else the creation date. (date_sent is Lob's date_created.)
-  function mailedCell(h) {
-    if (h.send_date) {
-      const sd = parseLobDate(h.send_date);
-      if (!isNaN(sd.getTime()) && sd.getTime() > Date.now()) return 'Scheduled ' + formatShortDate(h.send_date);
-    }
+  // The "Created" column: Lob's creation date (date_sent IS Lob's date_created,
+  // see mapLobLetter). Honest header: a create is not a mailing, so this is never
+  // filed under "Mailed". The scheduled/mailed lifecycle lives in the Status
+  // column (deriveStatus), never inferred from this timestamp.
+  function createdCell(h) {
     return formatShortDate(h.date_sent);
   }
   // Cancel is offered only while cancellation can plausibly succeed: the letter
@@ -894,13 +927,14 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     const liveEntry = h.mode === 'live';
     let left = '<div class="tracking-label">Tracking</div>';
     if (h.tracking_number) {
+      const copyBtn = '<button class="linklike tracking-copy" type="button" data-copy="' + esc(h.tracking_number) + '">Copy</button>';
       if (liveEntry) {
-        left += '<a class="tracking-link" href="' + esc(uspsTrackingUrl(h.tracking_number)) + '" target="_blank" rel="noopener">' + esc(h.tracking_number) + '</a>';
+        left += '<div class="tracking-num"><a class="tracking-link" href="' + esc(uspsTrackingUrl(h.tracking_number)) + '" target="_blank" rel="noopener">' + esc(h.tracking_number) + '</a>' + copyBtn + '</div>';
         if (h.extra_service === 'certified_return_receipt') {
           left += '<div class="tracking-hint">The signed receipt isn’t exposed by Lob; open USPS tracking and choose “Return Receipt Email” to receive the signature PDF.</div>';
         }
       } else {
-        left += '<span class="tracking-link">' + esc(h.tracking_number) + '</span>' +
+        left += '<div class="tracking-num"><span class="tracking-link">' + esc(h.tracking_number) + '</span>' + copyBtn + '</div>' +
           '<div class="tracking-hint">Proof press — not a real USPS number.</div>';
       }
     } else {
@@ -922,7 +956,7 @@ import { confirmDuplicateSends } from './duplicate.mjs';
       right = '<div class="tracking-hint" style="margin-top:0">No tracking events yet' +
         (h.expected_delivery_date ? ' · expected by ' + esc(formatShortDate(h.expected_delivery_date)) : '') + '.</div>';
     }
-    return '<tr class="ledger-detail" data-did="' + esc(h.id) + '"><td colspan="6">' +
+    return '<tr class="ledger-detail" id="detail-' + esc(h.id) + '" data-did="' + esc(h.id) + '"><td colspan="6">' +
       '<div class="ledger-detail-grid"><div>' + left + '</div><div>' + right + '</div></div>' +
     '</td></tr>';
   }
@@ -965,37 +999,47 @@ import { confirmDuplicateSends } from './duplicate.mjs';
       const service = h.extra_service ? (EXTRA_SERVICE_LABELS[h.extra_service] || h.extra_service)
         : (MAIL_TYPE_LABELS[h.mail_type] || h.mail_type || '');
       const name = esc(h.recipient_name || '(unnamed)') + (h.recipient_company ? ' — ' + esc(h.recipient_company) : '');
-      const actions =
+      const expanded = expandedIds.has(h.id);
+      // A REAL disclosure button carries the keyboard/AT affordance (the row is a
+      // mouse convenience only): keeping the toggle a <button> avoids nesting the
+      // Export/Cancel buttons inside a role=button row.
+      const toggleBtn = '<button class="ledger-toggle" type="button" data-toggle="' + esc(h.id) + '"' +
+        ' aria-expanded="' + (expanded ? 'true' : 'false') + '" aria-controls="detail-' + esc(h.id) + '"' +
+        ' aria-label="' + (expanded ? 'Hide' : 'Show') + ' tracking detail for ' + esc(h.recipient_name || 'this letter') + '">' + CHEVRON + '</button>';
+      const actions = toggleBtn +
         (LETTER_ID_RE.test(h.id) ? '<button class="btn btn-ghost" type="button" data-proof="' + esc(h.id) + '" title="Download a self-contained evidence bundle (request bytes, Lob response, rendered PDF, tracking, verifications, audit log) as a ZIP.">Export proof</button>' : '') +
         (canCancel(h) ? '<button class="btn btn-ghost danger" type="button" data-cancel="' + esc(h.id) + '">Cancel</button>' : '');
       const main = '<tr class="ledger-row" data-lid="' + esc(h.id) + '">' +
         '<td style="width:34%"><div class="ledger-name">' + name + '</div><div class="ledger-addr">' + esc(h.recipient_address || '') + '</div></td>' +
         '<td class="ledger-id">' + esc(h.id) + '</td>' +
         '<td class="ledger-cell">' + esc(service) + '</td>' +
-        '<td class="ledger-cell">' + esc(mailedCell(h)) + '</td>' +
+        '<td class="ledger-cell">' + esc(createdCell(h)) + '</td>' +
         '<td>' + tag + '</td>' +
         '<td class="ledger-actions">' + actions + '</td>' +
       '</tr>';
-      return main + (expandedIds.has(h.id) ? detailRowHTML(h) : '');
+      return main + (expanded ? detailRowHTML(h) : '');
     }).join('');
 
     const moreHtml = historyNextUrl ? '<div class="history-more"><button class="btn btn-secondary" id="btn-load-more" type="button">Load older letters</button></div>' : '';
     list.innerHTML =
-      '<table class="table">' +
-        '<thead><tr><th style="width:34%">Recipient</th><th>Letter №</th><th>Service</th><th>Mailed</th><th>Status</th><th></th></tr></thead>' +
+      '<div class="table-scroll"><table class="table">' +
+        '<thead><tr><th style="width:34%">Recipient</th><th>Letter №</th><th>Service</th><th>Created</th><th>Status</th><th></th></tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
-      '</table>' + moreHtml;
+      '</table></div>' + moreHtml;
 
-    // Row click toggles the tracking detail (buttons and links keep their own
-    // actions); expanding fetches the letter's current status from Lob.
+    // Row click toggles the tracking detail (a mouse convenience); the keyboard/AT
+    // path is the per-row disclosure <button>. Clicks on any button/link inside
+    // the row keep their own action and never toggle.
     list.querySelectorAll('tr.ledger-row').forEach(tr => {
       tr.addEventListener('click', (e) => {
         if (e.target.closest('button, a')) return;
         toggleDetail(tr.getAttribute('data-lid'));
       });
     });
+    list.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); toggleDetail(b.getAttribute('data-toggle')); }));
     list.querySelectorAll('[data-proof]').forEach(b => b.addEventListener('click', () => exportProof(b.getAttribute('data-proof'), b)));
     list.querySelectorAll('[data-cancel]').forEach(b => b.addEventListener('click', () => cancelLetter(b.getAttribute('data-cancel'), b)));
+    list.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); copyText(b.getAttribute('data-copy'), b); }));
     const moreBtn = $('btn-load-more');
     if (moreBtn) moreBtn.addEventListener('click', () => loadAccountHistory({ reset: false }));
 
@@ -1011,15 +1055,26 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     }
   }
 
+  // Re-focus a row's disclosure button after renderHistory() rebuilds the table.
+  // renderHistory replaces innerHTML, so the pre-toggle button node is gone;
+  // without this, keyboard focus would fall back to <body> on every toggle.
+  function focusToggle(id) {
+    const sel = window.CSS && CSS.escape ? CSS.escape(id) : JSON.stringify(String(id));
+    const b = $('history-list').querySelector('[data-toggle=' + sel + ']');
+    if (b) b.focus();
+  }
   async function toggleDetail(id) {
     if (!id) return;
-    if (expandedIds.has(id)) { expandedIds.delete(id); renderHistory(); return; }
-    expandedIds.add(id);
-    renderHistory(); // show the row immediately (with whatever is cached)
-    const h = history.find(x => x.id === id);
-    if (h && hasKey() && LETTER_ID_RE.test(id)) {
-      await fetchStatusForLetter(h); // pull current tracking for the open row
-      if (expandedIds.has(id)) renderHistory();
+    const willExpand = !expandedIds.has(id);
+    if (willExpand) expandedIds.add(id); else expandedIds.delete(id);
+    renderHistory(); // show/hide the row immediately (with whatever is cached)
+    focusToggle(id);
+    if (willExpand) {
+      const h = history.find(x => x.id === id);
+      if (h && hasKey() && LETTER_ID_RE.test(id)) {
+        await fetchStatusForLetter(h); // pull current tracking for the open row
+        if (expandedIds.has(id)) { renderHistory(); focusToggle(id); }
+      }
     }
   }
 
@@ -1234,7 +1289,9 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     // letter correctly reuses its key (Lob de-dupes) until the 24h window prunes it.
     renderRecipients();
     $('letter-body').value = '';
-    $('opt-color').checked = false; $('opt-double').checked = false; $('opt-reply-envelope').checked = false;
+    // Color defaults on — the compose screen presents color printing as the norm
+    // (see the initial checked state in index.html); reset returns to that norm.
+    $('opt-color').checked = true; $('opt-double').checked = false; $('opt-reply-envelope').checked = false;
     segSet('opt-mail-type', 'usps_first_class'); $('opt-extra-service').value = ''; segSet('opt-use-type', 'operational');
     $('opt-address-placement').value = 'top_first_page'; $('opt-send-date').value = ''; $('opt-description').value = '';
     syncMailClassLock(); // values were reset programmatically (no change event), so re-derive the lock
@@ -1262,6 +1319,7 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     if (currentView === 'history' && historyLoadedKey !== keyIdentity()) loadAccountHistory({ reset: true });
   }).catch(() => { /* config unavailable — paste-in only, as before */ });
   updateHistoryCount();
+  updateEnvBadge(); // paint the env tag at load; /api/config only repaints if a server key resolves
   syncMailClassLock(); // in case the browser restored a stale extra-service selection
   // Constrain the Send Date picker to the same window validateSendDate enforces:
   // minimum tomorrow (Lob rejects a same-day or past date), maximum 180 days out.
@@ -1279,4 +1337,8 @@ import { confirmDuplicateSends } from './duplicate.mjs';
   recipients = [{ id: nextRecipientId++, name: '', company: '', line1: '', line2: '', city: '', state: '', zip: '' }];
   renderRecipients();
   goToStep(0);
+  // Signal that the module has wired the app and painted the first step. Browser
+  // tests wait on this instead of a fixed timeout, closing the race where the
+  // suite drives the wizard before the module finished initializing.
+  document.body.setAttribute('data-app-ready', 'true');
 })();
