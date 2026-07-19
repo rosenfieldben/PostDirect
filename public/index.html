@@ -6,256 +6,219 @@
 <title>PostDirect — Physical Mail</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,500;0,8..60,600;0,8..60,700;1,8..60,400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400..700;1,8..60,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/broadsheet.css">
 <link rel="stylesheet" href="/css/app.css">
 </head>
 <body>
 <div class="app">
-  <header class="header">
-    <div class="header-brand">
-      <span class="header-mark-wrap" aria-hidden="true">
-        <svg class="header-mark" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <rect x="3" y="6" width="18" height="13" rx="1.4" stroke="currentColor" stroke-width="1.5"/>
-          <path d="M3.5 7.2l8.5 6 8.5-6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </span>
-      <div class="header-text">
-        <div class="header-title">PostDirect</div>
-        <div class="header-tagline">Physical mail · USPS</div>
+  <header class="masthead-pad">
+    <div class="masthead">
+      <div class="masthead-row" role="tablist" aria-label="Views">
+        <div class="brand">
+          <span class="brand-stamp" aria-hidden="true"><span class="brand-stamp-inner">PD</span></span>
+          <span class="brand-wordmark">PostDirect</span>
+        </div>
+        <button class="nav-link active" id="view-compose-tab" type="button" role="tab" aria-selected="true" aria-controls="view-compose" tabindex="0">Compose</button>
+        <button class="nav-link" id="view-history-tab" type="button" role="tab" aria-selected="false" aria-controls="view-history" tabindex="-1">History <span class="count">(<span id="history-count">0</span>)</span></button>
+        <span class="tag tag-neutral" id="env-badge"><span id="env-note-pre">Proof&nbsp;press&nbsp;·&nbsp;</span><span id="env-label">Test</span><span id="env-note-post"></span></span>
+        <form method="POST" action="/logout" class="sign-out-form"><button type="submit" class="sign-out">Sign out</button></form>
       </div>
+      <div class="masthead-rule"></div>
     </div>
-    <nav class="header-nav" role="tablist" aria-label="Views">
-      <button class="nav-tab active" id="view-compose-tab" type="button" role="tab" aria-selected="true" aria-controls="view-compose" tabindex="0">Compose</button>
-      <button class="nav-tab" id="view-history-tab" type="button" role="tab" aria-selected="false" aria-controls="view-history" tabindex="-1">History <span class="count" id="history-count">0</span></button>
-    </nav>
-    <div class="header-meta">
-      <div class="env-badge" id="env-badge"><span class="env-dot test" id="env-dot"></span><span id="env-label">Test</span></div>
-      <form method="POST" action="/logout" class="sign-out-form"><button type="submit" class="sign-out">Sign out</button></form>
+    <div class="api-rail">
+      <label class="api-rail-label" for="api-key-input">API key</label>
+      <input class="input" type="password" id="api-key-input" placeholder="test_… or live_…" autocomplete="off" spellcheck="false" />
+      <a class="api-rail-link" href="https://dashboard.lob.com" target="_blank" rel="noopener">Lob dashboard →</a>
     </div>
   </header>
 
   <main class="main">
-    <section class="api-bar">
-      <label class="api-label" for="api-key-input">API Key</label>
-      <input class="api-input" type="password" id="api-key-input" placeholder="test_... or live_..." autocomplete="off" spellcheck="false" />
-      <a class="api-link" href="https://dashboard.lob.com" target="_blank" rel="noopener">Dashboard →</a>
-    </section>
-
     <!-- ════════════════ COMPOSE VIEW ════════════════ -->
     <div id="view-compose" role="tabpanel" aria-labelledby="view-compose-tab">
-      <div class="steps" id="steps-bar">
-        <div class="steps-track">
-          <div class="steps-fill" id="steps-fill" style="width: 0%"></div>
+      <div class="content-col">
+        <div class="contents-line" id="steps-bar">
+          <span class="step-label active" id="sl-0"><span class="step-num">01</span>&nbsp;&nbsp;Sender</span>
+          <span class="step-label" id="sl-1"><span class="step-num">02</span>&nbsp;&nbsp;Recipients</span>
+          <span class="step-label" id="sl-2"><span class="step-num">03</span>&nbsp;&nbsp;Content</span>
+          <span class="step-label" id="sl-3"><span class="step-num">04</span>&nbsp;&nbsp;Review</span>
         </div>
-        <div class="steps-labels">
-          <div class="step-label active" id="sl-0">Sender</div>
-          <div class="step-label" id="sl-1">Recipients</div>
-          <div class="step-label" id="sl-2">Content</div>
-          <div class="step-label" id="sl-3">Review</div>
-        </div>
-      </div>
 
-      <!-- STEP 0: FROM -->
-      <div id="step-0">
-        <h1 class="section-title">Sender Address</h1>
-        <p class="section-desc">Your return address for the letter.</p>
-        <div class="form-grid cols-2">
-          <div class="field"><label class="field-label" for="from-name">Full Name <span class="req">*</span></label><input class="field-input" id="from-name" placeholder="Jane Smith" /></div>
-          <div class="field"><label class="field-label" for="from-company">Firm / Company</label><input class="field-input" id="from-company" placeholder="Smith & Associates" /></div>
-        </div>
-        <div class="field"><label class="field-label" for="from-line1">Address Line 1 <span class="req">*</span></label><input class="field-input" id="from-line1" placeholder="123 Main Street" /></div>
-        <div class="field"><label class="field-label" for="from-line2">Address Line 2</label><input class="field-input" id="from-line2" placeholder="Suite 400" /></div>
-        <div class="form-grid cols-3">
-          <div class="field"><label class="field-label" for="from-city">City <span class="req">*</span></label><input class="field-input" id="from-city" placeholder="New York" /></div>
-          <div class="field"><label class="field-label" for="from-state">State <span class="req">*</span></label><input class="field-input" id="from-state" placeholder="NY" /></div>
-          <div class="field"><label class="field-label" for="from-zip">ZIP <span class="req">*</span></label><input class="field-input" id="from-zip" placeholder="10001" /></div>
-        </div>
-      </div>
-
-      <!-- STEP 1: TO (multi-recipient) -->
-      <div id="step-1" class="is-hidden">
-        <h1 class="section-title">Recipients</h1>
-        <p class="section-desc">Add one or more recipients. The same letter will be mailed to each.</p>
-        <div id="recipients-list"></div>
-        <button class="btn-add-recipient" id="btn-add-recipient" type="button">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          Add another recipient
-        </button>
-        <div class="recipient-counter" id="recipient-counter"></div>
-      </div>
-
-      <!-- STEP 2: CONTENT -->
-      <div id="step-2" class="is-hidden">
-        <h1 class="section-title">Letter Content</h1>
-        <p class="section-desc">Compose a letter directly or upload a PDF to be printed and mailed.</p>
-        <div class="mode-tabs">
-          <button class="mode-tab active" id="tab-write" type="button" aria-pressed="true">Write Letter</button>
-          <button class="mode-tab" id="tab-upload" type="button" aria-pressed="false">Upload File</button>
-        </div>
-        <div id="mode-write">
-          <div class="field">
-            <label class="field-label" for="letter-body">Letter Body <span class="req">*</span></label>
-            <textarea class="field-textarea" id="letter-body" rows="16" placeholder="Dear Mr. Doe,&#10;&#10;I am writing to follow up on our recent correspondence regarding...&#10;&#10;Sincerely,&#10;Jane Smith"></textarea>
+        <!-- STEP 0: SENDER -->
+        <div id="step-0">
+          <h1 class="section-title">The return address.</h1>
+          <p class="section-desc">Printed on the envelope and at the head of the letter. Undeliverable mail comes back here.</p>
+          <div class="form-grid cols-2">
+            <div class="field"><label for="from-name">Full name *</label><input class="input" id="from-name" placeholder="Jane Smith" /></div>
+            <div class="field"><label for="from-company">Firm / company</label><input class="input" id="from-company" placeholder="Smith &amp; Associates" /></div>
+            <div class="field field-span"><label for="from-line1">Address line 1 *</label><input class="input" id="from-line1" placeholder="123 Main Street" /></div>
+            <div class="field field-span"><label for="from-line2">Address line 2</label><input class="input" id="from-line2" placeholder="Suite 400" /></div>
+          </div>
+          <div class="form-grid cols-city">
+            <div class="field"><label for="from-city">City *</label><input class="input" id="from-city" placeholder="New York" /></div>
+            <div class="field"><label for="from-state">State *</label><input class="input" id="from-state" placeholder="NY" /></div>
+            <div class="field"><label for="from-zip">ZIP *</label><input class="input" id="from-zip" placeholder="10001" /></div>
           </div>
         </div>
-        <div id="mode-upload" class="is-hidden">
-          <div class="upload-zone" id="upload-zone" role="button" tabindex="0" aria-label="Upload a PDF — activate to browse for a file, or drag and drop one here">
-            <input type="file" id="file-input" accept=".pdf" style="display:none" />
-            <div class="upload-icon">
-              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                <path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5z" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
-                <path d="M14 3v5h5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
+
+        <!-- STEP 1: RECIPIENTS -->
+        <div id="step-1" class="is-hidden">
+          <h1 class="section-title">The recipients.</h1>
+          <p class="section-desc">Everyone below receives the same letter, individually addressed and mailed.</p>
+          <div id="recipients-list"></div>
+          <div class="recipients-add-row">
+            <button class="btn btn-secondary" id="btn-add-recipient" type="button">+ Add another recipient</button>
+            <span class="step-note" id="recipient-counter"></span>
+          </div>
+        </div>
+
+        <!-- STEP 2: CONTENT -->
+        <div id="step-2" class="is-hidden">
+          <h1 class="section-title">The letter.</h1>
+          <p class="section-desc" style="margin-bottom:35px">Write it here, or upload a print-ready PDF. What you set on this page is exactly what gets printed, folded and mailed.</p>
+          <div class="seg" style="margin-bottom:30px">
+            <button type="button" class="seg-opt active" id="tab-write" aria-pressed="true">Write the letter</button>
+            <button type="button" class="seg-opt" id="tab-upload" aria-pressed="false">Upload a PDF</button>
+          </div>
+          <div id="mode-write">
+            <textarea class="letter-ruled" id="letter-body" rows="11" aria-label="Letter body" placeholder="Dear Mr. Doe,&#10;&#10;I am writing to follow up on our recent correspondence regarding...&#10;&#10;Sincerely,&#10;Jane Smith"></textarea>
+            <p class="ruled-caption">Printed on 8.5 × 11″ letter paper, set in a serif close to this one.</p>
+          </div>
+          <div id="mode-upload" class="is-hidden">
+            <div class="upload-zone" id="upload-zone" role="button" tabindex="0" aria-label="Upload a PDF — activate to browse for a file, or drag and drop one here">
+              <input type="file" id="file-input" accept=".pdf" style="display:none" />
+              <div class="upload-title">Drop a PDF on the press bed</div>
+              <div class="upload-sub">or <span class="linklike">browse for the file</span></div>
+              <div class="upload-hint">Maximum 50 MB · 8.5 × 11″ with ½″ margins recommended</div>
             </div>
-            <div class="upload-text"><strong>Drag & drop a PDF here</strong></div>
-            <div class="upload-sub">or click to browse</div>
-            <div class="upload-hint">Maximum 50 MB · Letter-size recommended</div>
+            <div class="file-row is-hidden" id="file-info">
+              <span class="pdf-stamp" id="file-icon">PDF</span>
+              <div style="flex:1;min-width:0">
+                <div class="file-row-name" id="file-name"></div>
+                <div class="file-row-size" id="file-size"></div>
+              </div>
+              <button class="btn btn-ghost" id="btn-remove" type="button" style="font-size:13px">Remove</button>
+            </div>
+            <p class="upload-note">Lob accepts PDF only. The address block prints per your placement setting.</p>
           </div>
-          <div class="file-info is-hidden" id="file-info">
-            <div class="file-info-left">
-              <div class="file-icon" id="file-icon">PDF</div>
-              <div>
-                <div class="file-name" id="file-name"></div>
-                <div class="file-size" id="file-size"></div>
+
+          <h6 class="options-head">Mailing options</h6>
+          <div class="form-grid cols-2">
+            <div class="field">
+              <label>Mail class</label>
+              <div class="seg" id="opt-mail-type-seg">
+                <label class="seg-opt"><input type="radio" name="opt-mail-type" value="usps_first_class" checked />First Class</label>
+                <label class="seg-opt"><input type="radio" name="opt-mail-type" value="usps_standard" />Standard</label>
+              </div>
+              <p class="field-hint">First Class arrives in 5–7 days and forwards with the recipient.</p>
+            </div>
+            <div class="field">
+              <label for="opt-extra-service">Extra service</label>
+              <div class="select-wrap">
+                <select class="input" id="opt-extra-service">
+                  <option value="">None</option>
+                  <option value="certified">Certified Mail</option>
+                  <option value="certified_return_receipt">Certified + Return Receipt</option>
+                  <option value="registered">Registered Mail</option>
+                </select>
+                <svg width="10" height="6" viewBox="0 0 10 6" fill="none" aria-hidden="true"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.2" fill="none"></path></svg>
+              </div>
+              <p class="field-hint">Certified and Registered ride First Class. Fees apply.</p>
+            </div>
+            <div class="field">
+              <label>Use type</label>
+              <div class="seg" id="opt-use-type-seg">
+                <label class="seg-opt"><input type="radio" name="opt-use-type" value="operational" checked />Operational</label>
+                <label class="seg-opt"><input type="radio" name="opt-use-type" value="marketing" />Marketing</label>
               </div>
             </div>
-            <button class="btn-remove" id="btn-remove" type="button">Remove</button>
-          </div>
-          <div class="upload-note"><strong>Note:</strong> Lob only accepts PDF files. For best results, use an 8.5×11″ page layout with at least 0.5″ margins.</div>
-        </div>
-
-        <div class="options-panel">
-          <div class="options-panel-title">Mailing Options</div>
-          <div class="form-grid cols-2">
             <div class="field">
-              <label class="field-label" for="opt-mail-type">Mail Class</label>
-              <select class="field-select" id="opt-mail-type">
-                <option value="usps_first_class">USPS First Class</option>
-                <option value="usps_standard">USPS Standard (Marketing)</option>
-              </select>
-              <div class="field-hint">First Class: 5–7 days, forwarding included. Standard: slower, bulk only. Locked to First Class while an extra service is selected.</div>
+              <label for="opt-address-placement">Address placement</label>
+              <div class="select-wrap">
+                <select class="input" id="opt-address-placement">
+                  <option value="top_first_page">Top of first page</option>
+                  <option value="insert_blank_page">Insert blank address page</option>
+                </select>
+                <svg width="10" height="6" viewBox="0 0 10 6" fill="none" aria-hidden="true"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.2" fill="none"></path></svg>
+              </div>
             </div>
             <div class="field">
-              <label class="field-label" for="opt-extra-service">Extra Service</label>
-              <select class="field-select" id="opt-extra-service">
-                <option value="">None</option>
-                <option value="certified">Certified Mail</option>
-                <option value="certified_return_receipt">Certified + Return Receipt</option>
-                <option value="registered">Registered Mail</option>
-              </select>
-              <div class="field-hint">Certified/Registered require First Class. Added fees apply.</div>
-            </div>
-          </div>
-          <div class="form-grid cols-2">
-            <div class="field">
-              <label class="field-label" for="opt-use-type">Use Type <span class="req">*</span></label>
-              <select class="field-select" id="opt-use-type">
-                <option value="operational">Operational</option>
-                <option value="marketing">Marketing</option>
-              </select>
-              <div class="field-hint">Operational: invoices, notices, compliance. Marketing: promotions.</div>
+              <label for="opt-send-date">Send date</label>
+              <input class="input" id="opt-send-date" type="date" />
+              <p class="field-hint">Blank mails immediately; schedule up to 180 days out.</p>
             </div>
             <div class="field">
-              <label class="field-label" for="opt-address-placement">Address Placement</label>
-              <select class="field-select" id="opt-address-placement">
-                <option value="top_first_page">Top of First Page (default)</option>
-                <option value="insert_blank_page">Insert Blank Address Page</option>
-              </select>
-              <div class="field-hint">Blank page inserts an address page before your content.</div>
+              <label for="opt-description">Description — internal memo</label>
+              <input class="input" id="opt-description" placeholder="Q4 invoice for Acme Corp" maxlength="255" />
             </div>
           </div>
-          <div class="field">
-            <label class="field-label" for="opt-send-date">Send Date</label>
-            <input class="field-input" id="opt-send-date" type="date" />
-            <div class="field-hint">Schedule from tomorrow up to 180 days out, or leave blank to send immediately.</div>
-          </div>
-          <div class="options-row-checks">
-            <label class="option-label"><input type="checkbox" id="opt-color" /> Color printing</label>
-            <label class="option-label"><input type="checkbox" id="opt-double" /> Double-sided</label>
-            <label class="option-label" title="Lob requires a return envelope to ride a perforated first page, so the two are set together."><input type="checkbox" id="opt-reply-envelope" /> Reply envelope (adds a perforated first page)</label>
-          </div>
-          <div class="field" style="margin-top:18px">
-            <label class="field-label" for="opt-description">Description / Memo</label>
-            <input class="field-input" id="opt-description" placeholder="e.g., Q4 invoice for Acme Corp" maxlength="255" />
-            <div class="field-hint">Internal note for your records (not printed on the letter).</div>
+          <div class="checks-row">
+            <label class="check-label"><input type="checkbox" id="opt-color" /> Color printing</label>
+            <label class="check-label"><input type="checkbox" id="opt-double" /> Double-sided</label>
+            <label class="check-label" title="Lob requires a return envelope to ride a perforated first page, so the two are set together."><input type="checkbox" id="opt-reply-envelope" /> Reply envelope — adds a perforated first page</label>
           </div>
         </div>
-      </div>
 
-      <!-- STEP 3: REVIEW -->
-      <div id="step-3" class="is-hidden">
-        <h1 class="section-title">Review &amp; Send</h1>
-        <p class="section-desc">Confirm the details below before mailing.</p>
-        <div class="addr-card from-card">
-          <div class="addr-card-label">From</div>
-          <div class="addr-card-body" id="review-from"></div>
+        <!-- STEP 3: REVIEW -->
+        <div id="step-3" class="is-hidden">
+          <h1 class="section-title">The final proof.</h1>
+          <p class="section-desc">Check everything below — this is exactly what goes to press and into the mail stream.</p>
+          <h6 class="review-h6">From</h6>
+          <div class="review-from-block" id="review-from"></div>
+          <h6 class="review-h6">Recipients — <span id="review-to-count">one</span></h6>
+          <div class="review-recipients" id="review-recipients"></div>
+          <label class="verify-ack is-hidden" id="verify-ack-wrap">
+            <input type="checkbox" id="verify-ack" />
+            <span>An address below is undeliverable according to USPS. Mail it anyway — I understand the postage may be wasted.</span>
+          </label>
+          <h6 class="review-h6">The letter as it prints</h6>
+          <div class="letter-sheet elev-md" id="review-body"></div>
+          <p class="review-summary" id="review-meta"></p>
+          <div class="error-box is-hidden" id="error-box" role="alert"></div>
+          <div class="send-progress is-hidden" id="send-progress" role="status" aria-live="polite"><span id="send-progress-text">Sending…</span></div>
         </div>
-        <div class="addr-card-label" style="margin-bottom:10px">Recipients <span id="review-to-count" style="font-weight:500;color:var(--text-dim)"></span></div>
-        <div class="review-recipients" id="review-recipients"></div>
-        <label class="verify-ack is-hidden" id="verify-ack-wrap">
-          <input type="checkbox" id="verify-ack" />
-          <span>One or more addresses are undeliverable according to USPS. Mail them anyway — I understand the postage may be wasted.</span>
-        </label>
-        <div class="preview-label">Letter Preview</div>
-        <div class="letter-preview" id="review-body"></div>
-        <div class="meta-row" id="review-meta"></div>
-        <div class="error-box is-hidden" id="error-box" role="alert"></div>
-        <div class="send-progress is-hidden" id="send-progress" role="status" aria-live="polite">
-          <div class="send-progress-spinner"></div>
-          <span id="send-progress-text">Sending…</span>
-        </div>
-      </div>
 
-      <!-- STEP 4: SUCCESS -->
-      <div id="step-4" class="success-view is-hidden">
-        <div class="success-header">
-          <div class="success-icon" id="success-icon">
-            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-              <path d="M5 12l5 5L20 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
+        <!-- STEP 4: SUCCESS -->
+        <div id="step-4" class="is-hidden">
+          <h6 class="success-kicker" id="success-kicker"></h6>
+          <h1 class="section-title success-title" id="success-title">Gone to press.</h1>
+          <p class="section-desc" id="success-desc"></p>
+          <div id="success-results"></div>
+          <div class="success-actions">
+            <button class="btn btn-secondary" id="btn-retry-failed" style="display:none" title="Re-sends only the failed recipients, reusing the same idempotency key so a letter Lob already created is never duplicated.">Retry failed</button>
+            <button class="btn btn-primary" id="btn-view-history">View the record →</button>
+            <button class="btn btn-secondary" id="btn-reset">Send another letter</button>
           </div>
-          <h2 class="success-title" id="success-title">Letter Queued</h2>
-          <p class="success-desc" id="success-desc"></p>
         </div>
-        <div class="success-results" id="success-results"></div>
-        <div class="success-actions">
-          <button class="btn btn-primary" id="btn-retry-failed" style="display:none" title="Re-sends only the failed recipients, reusing the same idempotency key so a letter Lob already created is never duplicated.">Retry failed</button>
-          <button class="btn btn-secondary" id="btn-view-history">View in History</button>
-          <button class="btn btn-secondary" id="btn-reset">Send Another</button>
-        </div>
-      </div>
 
-      <div class="btn-nav" id="nav-bar">
-        <button class="btn btn-secondary" id="btn-back" disabled>← Back</button>
-        <button class="btn btn-primary" id="btn-next">Continue →</button>
+        <div class="wizard-footer" id="nav-bar">
+          <span class="wizard-footer-left">
+            <span class="step-note" id="step-note">Step one of four</span>
+            <button class="btn btn-ghost is-hidden" id="btn-back" type="button">← Back</button>
+          </span>
+          <button class="btn btn-primary" id="btn-next" type="button">Continue to recipients →</button>
+        </div>
       </div>
     </div>
 
     <!-- ════════════════ HISTORY VIEW ════════════════ -->
     <div id="view-history" class="is-hidden" role="tabpanel" aria-labelledby="view-history-tab">
-      <div class="history-header">
-        <div class="history-header-text">
-          <h1 class="section-title">Sent Letters</h1>
-          <p class="section-desc" style="margin-bottom:0">Every letter on your Lob account for the API key above — live or test, matching the key’s environment.</p>
+      <div class="history-col">
+        <div class="history-title-row">
+          <h1 class="section-title">The record.</h1>
+          <div class="history-actions">
+            <span class="history-meta" id="history-last-refreshed"></span>
+            <button class="btn btn-secondary" id="btn-refresh-all" type="button">Refresh</button>
+          </div>
         </div>
-        <div class="history-actions">
-          <span class="history-meta" id="history-last-refreshed"></span>
-          <button class="btn btn-secondary" id="btn-refresh-all" type="button">Refresh all</button>
+        <p class="history-desc">Every letter on this account — live USPS tracking, and a court-ready proof package for each one.</p>
+        <div class="history-empty is-hidden" id="history-empty">
+          <p class="history-empty-title">Nothing has gone to press yet.</p>
+          <p class="history-empty-desc">Letters you send will appear here with live USPS tracking and an exportable proof package.</p>
+          <button class="btn btn-primary" id="btn-compose-first" type="button">Compose the first letter →</button>
         </div>
+        <div id="history-list"></div>
       </div>
-
-      <div class="history-empty is-hidden" id="history-empty">
-        <div class="history-empty-icon">
-          <svg width="42" height="42" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-            <rect x="3" y="6" width="18" height="13" rx="1" stroke="currentColor" stroke-width="1.25"/>
-            <path d="M3 8l9 6 9-6" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </div>
-        <div class="history-empty-title">No letters sent yet</div>
-        <div class="history-empty-desc">Letters you send will appear here with live delivery status.</div>
-      </div>
-
-      <div id="history-list"></div>
     </div>
   </main>
 </div>

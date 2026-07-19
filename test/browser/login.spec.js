@@ -11,6 +11,6 @@ test('login: wrong password shows the error, correct password reaches the app', 
   await page.fill('#username', app.creds.username);
   await page.fill('#password', app.creds.password);
   await page.click('button[type=submit]');
-  // The app shell rendered (the first wizard step heading is "Sender Address").
-  await expect(page.locator('#step-0 .section-title')).toContainText('Sender Address');
+  // The app shell rendered (the first wizard step heading, per the redesign).
+  await expect(page.locator('#step-0 .section-title')).toContainText('The return address.');
 });

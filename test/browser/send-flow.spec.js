@@ -9,16 +9,18 @@ test('send flow: honest labels, proof export, and the duplicate warning', async 
 
   // ── Send a letter through the wizard ──
   await composeToReview(page);
-  await page.click('#btn-next'); // Mail (no prior send yet, so no duplicate prompt)
+  await page.click('#btn-next'); // Send (no prior send yet, so no duplicate prompt)
   await page.waitForSelector('#step-4:not(.is-hidden)');
 
-  // A create is "Queued", never "Mailed": the Phase 1 honest-label rule.
-  await expect(page.locator('#success-title')).toContainText('Letter Queued');
+  // A create is "Queued", never "Mailed": the Phase 1 honest-label rule. The
+  // redesign titles the state "Gone to press." while the per-letter status tag
+  // stays the honest "Queued".
+  await expect(page.locator('#success-title')).toContainText('Gone to press.');
   await expect(page.locator('#success-results .status-badge').first()).toHaveText('Queued');
 
   // ── History shows an honest lifecycle label (not "Mailed"/"Delivered") ──
   await page.click('#view-history-tab');
-  const badge = page.locator('.letter-card .status-badge').first();
+  const badge = page.locator('#history-list .status-badge').first();
   await expect(badge).toBeVisible();
   const badgeText = (await badge.textContent()).trim();
   expect(badgeText).not.toMatch(/Mailed|Delivered/);
@@ -27,7 +29,7 @@ test('send flow: honest labels, proof export, and the duplicate warning', async 
   // ── Proof export downloads a ZIP the independent reader validates ──
   const [download] = await Promise.all([
     page.waitForEvent('download'),
-    page.locator('.letter-card [data-proof]').first().click(),
+    page.locator('#history-list [data-proof]').first().click(),
   ]);
   const zipPath = await download.path();
   const entries = readZip(fs.readFileSync(zipPath));
@@ -48,7 +50,7 @@ test('send flow: honest labels, proof export, and the duplicate warning', async 
   let dialogMessage = null;
   page.on('dialog', (d) => { dialogMessage = d.message(); d.dismiss(); });
   await composeToReview(page); // identical letter, recipient id back to 1
-  await page.click('#btn-next'); // Mail -> duplicate check -> confirm() dialog
+  await page.click('#btn-next'); // Send -> duplicate check -> confirm() dialog
   await expect.poll(() => dialogMessage, { timeout: 10_000 }).toContain('Possible duplicate send');
   // Dialog dismissed, so no second letter was sent: still on the review step.
   await expect(page.locator('#step-3')).toBeVisible();

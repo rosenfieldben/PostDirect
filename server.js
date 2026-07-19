@@ -147,8 +147,11 @@ function serveStatic(res, filePath) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// LOGIN PAGE (minimalist light / firm-professional)
+// LOGIN PAGE (Broadsheet: ink on paper, masthead rules, spot cyan)
 // ══════════════════════════════════════════════════════════════
+// Served PRE-AUTH, so it cannot link the authenticated /css assets; its styles
+// are inline (style-src keeps 'unsafe-inline' for exactly this page). The
+// tokens are copied from public/css/broadsheet.css; retune there first.
 function loginPage(error) {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -157,219 +160,114 @@ function loginPage(error) {
 <title>PostDirect — Sign In</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,500;0,8..60,600;0,8..60,700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400..700;1,8..60,400&display=swap" rel="stylesheet">
 <style>
   :root {
-    /* Deep navy backdrop falling to ink black (matches the app's ink-950) */
-    --bg: #05070c;
-    --bg-grad: radial-gradient(1200px 720px at 50% -280px, #16315f 0%, #0e2147 44%, #05070c 100%);
-    --surface: #ffffff;
-    --surface-warm: #f4f7fc;
-    --ink: #0c1c3a;
-    --text: #28324a;
-    --text-dim: #586079;
-    --text-muted: #6b748b;
-    --border: #dfe4ee;
-    --border-strong: #c5cdde;
-    --border-soft: #eaeef5;
-    --hairline: rgba(12,28,58,0.08);
-    --focus-ring: 0 0 0 3px rgba(47,109,240,0.22);
-    --cobalt: #2f6df0;
-    --accent: #f4a92b;
-    --gold: #9a6a14;
-    --success: #0f7a52;
-    /* danger is the wax family (matches the app's live/error red) */
-    --danger: #8c2318;
-    --danger-bg: #f9eceb;
-    --danger-border: rgba(140,35,24,0.28);
-    --white: #ffffff;
-    --brand-grad: linear-gradient(135deg, #1c3f7e 0%, #0e2147 56%, #05070c 100%);
-    --shadow-xs: 0 1px 2px rgba(12,28,58,0.06);
-    --shadow-lg: 0 18px 50px rgba(4,10,26,0.45), 0 4px 14px rgba(4,10,26,0.30);
+    --color-bg: #f3f2f2;
+    --color-surface: #eae9e9;
+    --color-text: #201e1d;
+    --color-accent: #0088b0;
+    --color-accent-600: #1186ac;
+    --color-accent-700: #006786;
+    --color-accent-2-700: #aa0b56;
+    --color-neutral-400: #bab6b6;
+    --color-divider: color-mix(in srgb, #201e1d 16%, transparent);
+    --font-serif: 'Source Serif 4', Georgia, serif;
   }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+  *, *::before, *::after { box-sizing: border-box; }
   body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: var(--bg);
-    background-image: var(--bg-grad);
-    background-attachment: fixed;
-    color: var(--text);
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-    padding: 24px;
-    line-height: 1.5;
+    margin: 0; background: var(--color-bg); color: var(--color-text);
+    font-family: var(--font-serif); font-size: 15px; line-height: 1.55;
   }
-  .login-card {
-    width: 100%;
-    max-width: 420px;
-    padding: 46px 44px 34px;
-    background: var(--surface);
-    border: 1px solid rgba(255,255,255,0.6);
-    border-radius: 18px;
-    box-shadow: var(--shadow-lg);
-    position: relative;
-    overflow: hidden;
+  :focus { outline: none; }
+  :focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+  .sheet { max-width: 760px; margin: 0 auto; }
+  .masthead-pad { padding: 28px 56px 0; }
+  .masthead { border-top: 3px solid var(--color-text); }
+  .masthead-row { display: flex; align-items: center; justify-content: space-between; padding: 13px 0; }
+  .masthead-rule { border-bottom: 1px solid var(--color-text); }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand-stamp {
+    display: grid; place-items: center; width: 27px; height: 33px;
+    border: 1px solid var(--color-text); background: var(--color-bg); flex-shrink: 0;
   }
-  .login-card::before {
-    content: "";
-    position: absolute;
-    left: 0; right: 0; top: 0;
-    height: 3px;
-    background: linear-gradient(90deg, var(--cobalt) 0%, var(--accent) 100%);
+  .brand-stamp-inner {
+    display: grid; place-items: center; width: 21px; height: 27px;
+    border: 1px dashed var(--color-neutral-400);
+    font-weight: 600; font-size: 11px; color: var(--color-accent-700);
   }
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 10px;
-    justify-content: center;
-    position: relative;
+  .brand-wordmark { font-weight: 600; font-size: 20px; letter-spacing: -0.015em; }
+  .tagline {
+    font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: color-mix(in srgb, var(--color-text) 55%, transparent);
   }
-  .brand-mark-wrap {
-    width: 40px; height: 40px;
-    border-radius: 11px;
-    background: var(--brand-grad);
-    color: #eaf1ff;
-    display: inline-flex; align-items: center; justify-content: center;
-    box-shadow: 0 1px 0 rgba(255,255,255,0.14) inset, 0 6px 16px rgba(12,28,58,0.28);
-    position: relative;
-  }
-  .brand-mark-wrap::after {
-    content: ""; position: absolute; right: -3px; top: -3px;
-    width: 9px; height: 9px; border-radius: 50%;
-    background: var(--accent); box-shadow: 0 0 0 2px var(--surface), 0 0 10px rgba(244,169,43,0.55);
-  }
-  .brand-mark { width: 21px; height: 21px; }
-  .brand-name { font-family: 'Source Serif 4', Georgia, serif; font-weight: 600; font-size: 25px; color: var(--ink); letter-spacing: -0.02em; }
-  .brand-sub {
-    text-align: center;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-    color: var(--text-muted);
-    margin-bottom: 38px;
-    position: relative;
-  }
-  .brand-sub::before, .brand-sub::after {
-    content: "";
-    display: inline-block;
-    width: 22px; height: 1px;
-    background: var(--border);
-    vertical-align: middle;
-    margin: 0 12px;
-  }
-  .field { margin-bottom: 18px; position: relative; }
-  .field-label {
-    display: block;
-    margin-bottom: 8px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.11em;
-    color: var(--text-dim);
-  }
-  .field-input {
-    width: 100%;
-    padding: 12px 14px;
-    border: 1px solid var(--border);
-    border-radius: 9px;
-    font-size: 14px;
-    font-family: 'Inter', sans-serif;
-    background: var(--surface-warm);
-    color: var(--text);
-    outline: none;
-    transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
-    box-shadow: var(--shadow-xs);
-  }
-  .field-input:hover { border-color: var(--border-strong); }
-  .field-input:focus { border-color: var(--cobalt); box-shadow: var(--focus-ring); background: var(--surface); }
-  .btn {
-    width: 100%;
-    padding: 13px;
-    border-radius: 10px;
-    font-size: 13.5px;
-    font-weight: 600;
-    font-family: 'Inter', sans-serif;
-    cursor: pointer;
-    border: 1px solid transparent;
-    background: var(--brand-grad);
-    color: var(--white);
-    transition: all 0.18s ease;
-    margin-top: 16px;
-    box-shadow: 0 1px 0 rgba(255,255,255,0.12) inset, 0 2px 6px rgba(12,28,58,0.20), 0 8px 18px rgba(14,33,71,0.20);
-    letter-spacing: 0.02em;
-  }
-  .btn:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 1px 0 rgba(255,255,255,0.16) inset, 0 4px 10px rgba(12,28,58,0.24), 0 12px 26px rgba(31,80,201,0.28);
-  }
-  .btn:active { transform: translateY(0); }
+  .content { padding: 64px 56px 80px; max-width: 460px; }
+  h1 { margin: 0 0 10px; font-size: 42px; font-weight: 600; line-height: 1.12; letter-spacing: -0.015em; }
+  .sub { margin: 0 0 40px; font-size: 15px; color: color-mix(in srgb, var(--color-text) 68%, transparent); }
   .error {
-    padding: 11px 14px;
-    border-radius: 9px;
-    background: var(--danger-bg);
-    border: 1px solid var(--danger-border);
-    color: var(--danger);
-    font-size: 13px;
-    margin-bottom: 20px;
-    text-align: center;
-    font-weight: 500;
+    margin: 0 0 26px; font-size: 13.5px; line-height: 1.6;
+    color: var(--color-accent-2-700);
   }
+  .field { margin-bottom: 22px; }
+  .field.last { margin-bottom: 34px; }
+  .field label {
+    display: block; font-size: 12px; margin-bottom: 5px;
+    color: color-mix(in srgb, var(--color-text) 70%, transparent);
+  }
+  .input {
+    width: 100%; min-height: 36px; padding: 6px 10px; font: inherit; font-size: 14px;
+    color: var(--color-text); caret-color: var(--color-accent);
+    background: var(--color-surface);
+    border: 1px solid var(--color-divider); border-radius: 2px;
+  }
+  .input:hover { border-color: color-mix(in srgb, var(--color-text) 45%, transparent); }
+  .input:focus-visible { border-color: var(--color-accent); outline-offset: 0; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; width: 100%;
+    margin-top: 10px; cursor: pointer; font-family: var(--font-serif); font-weight: 600;
+    font-size: 14px; line-height: 1.2; color: var(--color-bg);
+    background: var(--color-accent); border: 1px solid transparent;
+    padding: 10px 18px; border-radius: 2px;
+  }
+  .btn:hover { background: var(--color-accent-600); }
+  .btn:active { background: var(--color-accent-700); }
   .footer {
-    text-align: center;
-    margin-top: 30px;
-    padding-top: 22px;
-    border-top: 1px solid var(--border-soft);
-    font-size: 10.5px;
-    font-weight: 700;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-    color: var(--text-muted);
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    justify-content: center;
-  }
-  .footer::before {
-    content: "";
-    width: 7px; height: 7px;
-    border-radius: 50%;
-    background: var(--success);
-    box-shadow: 0 0 0 3px rgba(15,122,82,0.18);
+    margin: 30px 0 0; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: color-mix(in srgb, var(--color-text) 50%, transparent);
   }
 </style>
 </head>
 <body>
-<div class="login-card">
-  <div class="brand">
-    <span class="brand-mark-wrap" aria-hidden="true">
-      <svg class="brand-mark" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <rect x="3" y="6" width="18" height="13" rx="1.4" stroke="currentColor" stroke-width="1.5"/>
-        <path d="M3.5 7.2l8.5 6 8.5-6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-    </span>
-    <div class="brand-name">PostDirect</div>
+<div class="sheet">
+  <header class="masthead-pad">
+    <div class="masthead">
+      <div class="masthead-row">
+        <div class="brand">
+          <span class="brand-stamp" aria-hidden="true"><span class="brand-stamp-inner">PD</span></span>
+          <span class="brand-wordmark">PostDirect</span>
+        </div>
+        <span class="tagline">Physical mail · USPS</span>
+      </div>
+      <div class="masthead-rule"></div>
+    </div>
+  </header>
+  <div class="content">
+    <h1>Sign in.</h1>
+    <p class="sub">PostDirect mails real letters. Operators only.</p>
+    ${error ? '<p class="error">' + escapeHtml(error) + '</p>' : ''}
+    <form method="POST" action="/login">
+      <div class="field">
+        <label for="username">Username</label>
+        <input class="input" type="text" name="username" id="username" autocomplete="username" required autofocus />
+      </div>
+      <div class="field last">
+        <label for="password">Password</label>
+        <input class="input" type="password" name="password" id="password" autocomplete="current-password" required />
+      </div>
+      <button class="btn" type="submit">Sign in</button>
+    </form>
+    <p class="footer">Secured access · sessions expire after 7 days</p>
   </div>
-  <div class="brand-sub">Physical mail · USPS</div>
-  ${error ? '<div class="error">' + escapeHtml(error) + '</div>' : ''}
-  <form method="POST" action="/login">
-    <div class="field">
-      <label class="field-label" for="username">Username</label>
-      <input class="field-input" type="text" name="username" id="username" autocomplete="username" required autofocus />
-    </div>
-    <div class="field">
-      <label class="field-label" for="password">Password</label>
-      <input class="field-input" type="password" name="password" id="password" autocomplete="current-password" required />
-    </div>
-    <button class="btn" type="submit">Sign In</button>
-  </form>
-  <div class="footer">Secured access</div>
 </div>
 </body>
 </html>`;
