@@ -10,6 +10,10 @@ async function login(page, app) {
   await page.fill('#password', app.creds.password);
   await page.click('button[type=submit]');
   await page.waitForSelector('#api-key-input', { timeout: 15000 });
+  // The app module sets data-app-ready once it has wired events and painted the
+  // first step. Waiting on it (rather than a fixed timeout) closes the race where
+  // the suite drives the wizard before the module finished initializing.
+  await page.waitForSelector('body[data-app-ready="true"]', { timeout: 15000 });
 }
 
 // Recipient inputs carry a dynamic id (r-<n>-...), and n increments after each
@@ -41,15 +45,16 @@ async function composeToReview(page) {
   await page.waitForSelector('#letter-body');
   await page.fill('#letter-body', 'Dear John, this is a characterization test notice. Sincerely, Jane.');
   await page.click('#btn-next');
-  // Step 3: review; wait for verification to settle so the button reads "Mail".
-  // Use web-first locator assertions (not page.waitForFunction): the latter
-  // re-polls its predicate via in-page eval, which the app's CSP (no
-  // 'unsafe-eval') blocks on any poll after the first, making it flaky. Locator
-  // assertions run in Playwright's isolated context and never eval page script.
+  // Step 3: review; wait for verification to settle so the button reads
+  // "Send one letter". Use web-first locator assertions (not
+  // page.waitForFunction): the latter re-polls its predicate via in-page eval,
+  // which the app's CSP (no 'unsafe-eval') blocks on any poll after the first,
+  // making it flaky. Locator assertions run in Playwright's isolated context
+  // and never eval page script.
   await page.waitForSelector('#step-3:not(.is-hidden)');
-  const mailBtn = page.locator('#btn-next');
-  await expect(mailBtn).toContainText('Mail');
-  await expect(mailBtn).toBeEnabled();
+  const sendBtn = page.locator('#btn-next');
+  await expect(sendBtn).toContainText(/^Send/);
+  await expect(sendBtn).toBeEnabled();
 }
 
 // ── Independent store-only ZIP reader (parses EOCD + central directory and

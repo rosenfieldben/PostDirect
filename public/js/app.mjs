@@ -24,7 +24,12 @@ import { confirmDuplicateSends } from './duplicate.mjs';
   // populateReview and renderHistory, where they had drifted (the same service
   // read "Certified + Return Receipt" on Review but "Certified + RR" in History).
   const MAIL_TYPE_LABELS = { usps_first_class: 'First Class', usps_standard: 'Standard' };
-  const EXTRA_SERVICE_LABELS = { '': 'None', certified: 'Certified', certified_return_receipt: 'Certified + Return Receipt', registered: 'Registered' };
+  const EXTRA_SERVICE_LABELS = { '': 'None', certified: 'Certified Mail', certified_return_receipt: 'Certified + Return Receipt', registered: 'Registered Mail' };
+  // Counts read as words in the redesign's copy ("Two recipients", "Send two
+  // letters"); beyond twelve the numeral is clearer than the word.
+  const COUNT_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve'];
+  const countWord = (n) => COUNT_WORDS[n] || String(n);
+  const countWordCap = (n) => { const w = countWord(n); return w.charAt(0).toUpperCase() + w.slice(1); };
 
   // ── App state ──
   let currentStep = 0, sending = false;
@@ -54,6 +59,11 @@ import { confirmDuplicateSends } from './duplicate.mjs';
 
   const $ = id => document.getElementById(id);
   const v = id => $(id).value.trim();
+  // Segmented radio controls (Mail class, Use type): value accessors over the
+  // radio group, mirroring the .value/.disabled contract the old <select>s had.
+  const segGet = (name) => { const el = document.querySelector('input[name="' + name + '"]:checked'); return el ? el.value : ''; };
+  const segSet = (name, value) => { document.querySelectorAll('input[name="' + name + '"]').forEach(i => { i.checked = i.value === value; }); };
+  const segDisable = (name, disabled) => { document.querySelectorAll('input[name="' + name + '"]').forEach(i => { i.disabled = disabled; }); };
   // ═══ API key resolution ═══
   // The key can come from two places: pasted into the UI, or held server-side
   // (PD_LOB_KEY, discovered via GET /api/config at init). A pasted key always
@@ -115,7 +125,7 @@ import { confirmDuplicateSends } from './duplicate.mjs';
   }
   function setHistoryLoading(loading) {
     const btn = $('btn-refresh-all');
-    if (btn) { btn.disabled = loading; btn.textContent = loading ? 'Loading…' : 'Refresh all'; }
+    if (btn) { btn.disabled = loading; btn.textContent = loading ? 'Loading…' : 'Refresh'; }
   }
   // Fetch the account's letters through the proxy, paging via next_url up to a cap.
   async function loadAccountHistory(opts) {
@@ -155,6 +165,7 @@ import { confirmDuplicateSends } from './duplicate.mjs';
       historyNextUrl = url;            // null when fully paged; otherwise the cursor for "Load older"
       historyEnv = env;
       historyLoadedKey = keyIdentity();
+      historyFetchedAt = new Date();
       const opt = optimistic.filter(o => o.mode === env && !seen[o.id]);  // keep just-sent letters not yet in the list
       history = opt.concat(collected);
     } catch (e) {
@@ -166,7 +177,14 @@ import { confirmDuplicateSends } from './duplicate.mjs';
       renderHistory();
     }
   }
-  // Copy-to-clipboard with a graceful, dependency-free fallback.
+  // Expanded ledger rows (letter id -> true). Expanding a row fetches that
+  // letter's current status from Lob, so the timeline is live per letter.
+  const expandedIds = new Set();
+  let historyFetchedAt = null;
+
+  // Copy-to-clipboard with a graceful, dependency-free fallback. Restored for
+  // the tracking-number Copy buttons (a long certified/registered number is
+  // pasted into case records; drag-select is error-prone and keyboard-hostile).
   function copyText(text, btn) {
     const flash = () => { if (btn) { const o = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = o; }, 1200); } };
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -226,23 +244,36 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     return { pending: pending && hasKey(), blocked };
   }
 
+  // Map a verification level onto the design system's tags. Magenta is reserved
+  // for postage at stake, so ONLY an undeliverable verdict wears tag-accent-2;
+  // a failed check (error) is neutral, and unit warnings take the cyan outline.
+  const VERIFY_TAG = { ok: 'tag-accent', warn: 'tag-outline', blocked: 'tag-accent-2', error: 'tag-neutral' };
   function renderVerifyLine(id, result) {
+    const tagEl = document.getElementById('verify-tag-' + id);
     const el = document.getElementById('verify-r-' + id);
-    if (!el) return;
+    if (!el || !tagEl) return;
     if (!result) {
-      el.innerHTML = '<div class="verify-row"><span class="verify-spinner"></span><span class="verify-note">Verifying with USPS…</span></div>';
+      tagEl.className = 'tag tag-neutral';
+      tagEl.textContent = 'Verifying…';
+      el.innerHTML = '<span class="verify-note">Checking this address with USPS…</span>';
       return;
     }
-    const variant = result.level === 'ok' ? 'success' : result.level === 'warn' ? 'progress' : result.level === 'blocked' ? 'error' : 'muted';
-    let html = '<div class="verify-row"><span class="status-badge ' + variant + '">' + esc(result.label) + '</span></div>';
-    if (result.note) html += '<div class="verify-note">' + esc(result.note) + '</div>';
+    tagEl.className = 'tag ' + (VERIFY_TAG[result.level] || 'tag-neutral');
+    tagEl.textContent = result.label;
+    // Always seed the live region with the verdict label. A clean "ok" verdict
+    // carries no note, so without this the aria-live region would be emptied and
+    // announce nothing — the result of the address check would be inaudible to a
+    // screen-reader user. The visually-hidden line names the outcome; any note or
+    // USPS suggestion follows.
+    let html = '<span class="sr-only">Verification: ' + esc(result.label) + '.</span>';
+    if (result.note) html += '<div class="verify-note' + (result.level === 'blocked' ? ' blocked' : '') + '">' + esc(result.note) + '</div>';
     // Offer the standardized form only for sendable verdicts: for an
     // undeliverable address a "correction" to the same bad address is noise.
     if ((result.level === 'ok' || result.level === 'warn') && result.differs && result.corrected) {
       const c = result.corrected;
       const line = [c.line1, c.line2, [c.city, c.state].filter(Boolean).join(', ') + ' ' + c.zip].filter(Boolean).join(', ');
-      html += '<div class="verify-suggest"><span>USPS standard: <strong>' + esc(line) + '</strong></span>' +
-        '<button class="btn-mini" type="button" data-usecorrected="' + esc(id) + '">Use corrected</button></div>';
+      html += '<div class="verify-suggest">USPS suggests <strong>' + esc(line) + '</strong> · ' +
+        '<button class="linklike" type="button" data-usecorrected="' + esc(id) + '">Use suggested</button></div>';
     }
     el.innerHTML = html;
     const btn = el.querySelector('[data-usecorrected]');
@@ -308,26 +339,26 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     return live.length > 0 && live.every(recipientIsValid);
   }
 
-  // ═══ Recipient card rendering ═══
+  // ═══ Recipient block rendering (kicker + open grid; no card) ═══
   function recipientCardHTML(r, index, total) {
     const id = r.id;
     const showRemove = total > 1;
     return (
-      '<div class="recipient-card" data-rid="' + esc(id) + '">' +
-        '<div class="recipient-card-header">' +
-          '<div class="recipient-number">Recipient ' + (index + 1) + '</div>' +
-          (showRemove ? '<button type="button" class="btn-remove-recipient" data-remove="' + esc(id) + '">Remove</button>' : '') +
+      '<div class="recipient-block" data-rid="' + esc(id) + '">' +
+        '<div class="recipient-head">' +
+          '<h6 class="recipient-kicker">Recipient № ' + (index + 1) + '</h6>' +
+          (showRemove ? '<button type="button" class="btn btn-ghost" style="font-size:13px" data-remove="' + esc(id) + '">Remove</button>' : '') +
         '</div>' +
         '<div class="form-grid cols-2">' +
-          '<div class="field"><label class="field-label" for="r-' + id + '-name">Full Name <span class="req">*</span></label><input class="field-input" id="r-' + id + '-name" data-rfield value="' + esc(r.name) + '" placeholder="John Doe" /></div>' +
-          '<div class="field"><label class="field-label" for="r-' + id + '-company">Firm / Company</label><input class="field-input" id="r-' + id + '-company" data-rfield value="' + esc(r.company) + '" placeholder="Doe Industries" /></div>' +
+          '<div class="field"><label for="r-' + id + '-name">Full name *</label><input class="input" id="r-' + id + '-name" data-rfield value="' + esc(r.name) + '" placeholder="John Doe" /></div>' +
+          '<div class="field"><label for="r-' + id + '-company">Firm / company</label><input class="input" id="r-' + id + '-company" data-rfield value="' + esc(r.company) + '" placeholder="Doe Industries" /></div>' +
+          '<div class="field field-span"><label for="r-' + id + '-line1">Address line 1 *</label><input class="input" id="r-' + id + '-line1" data-rfield value="' + esc(r.line1) + '" placeholder="456 Oak Avenue" /></div>' +
+          '<div class="field field-span"><label for="r-' + id + '-line2">Address line 2</label><input class="input" id="r-' + id + '-line2" data-rfield value="' + esc(r.line2) + '" placeholder="Floor 2" /></div>' +
         '</div>' +
-        '<div class="field"><label class="field-label" for="r-' + id + '-line1">Address Line 1 <span class="req">*</span></label><input class="field-input" id="r-' + id + '-line1" data-rfield value="' + esc(r.line1) + '" placeholder="456 Oak Avenue" /></div>' +
-        '<div class="field"><label class="field-label" for="r-' + id + '-line2">Address Line 2</label><input class="field-input" id="r-' + id + '-line2" data-rfield value="' + esc(r.line2) + '" placeholder="Floor 2" /></div>' +
-        '<div class="form-grid cols-3">' +
-          '<div class="field"><label class="field-label" for="r-' + id + '-city">City <span class="req">*</span></label><input class="field-input" id="r-' + id + '-city" data-rfield value="' + esc(r.city) + '" placeholder="Chicago" /></div>' +
-          '<div class="field"><label class="field-label" for="r-' + id + '-state">State <span class="req">*</span></label><input class="field-input" id="r-' + id + '-state" data-rfield value="' + esc(r.state) + '" placeholder="IL" /></div>' +
-          '<div class="field"><label class="field-label" for="r-' + id + '-zip">ZIP <span class="req">*</span></label><input class="field-input" id="r-' + id + '-zip" data-rfield value="' + esc(r.zip) + '" placeholder="60601" /></div>' +
+        '<div class="form-grid cols-city">' +
+          '<div class="field"><label for="r-' + id + '-city">City *</label><input class="input" id="r-' + id + '-city" data-rfield value="' + esc(r.city) + '" placeholder="Chicago" /></div>' +
+          '<div class="field"><label for="r-' + id + '-state">State *</label><input class="input" id="r-' + id + '-state" data-rfield value="' + esc(r.state) + '" placeholder="IL" /></div>' +
+          '<div class="field"><label for="r-' + id + '-zip">ZIP *</label><input class="input" id="r-' + id + '-zip" data-rfield value="' + esc(r.zip) + '" placeholder="60601" /></div>' +
         '</div>' +
       '</div>'
     );
@@ -337,7 +368,9 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     recipients = readAllRecipients();
     const list = $('recipients-list');
     list.innerHTML = recipients.map((r, i) => recipientCardHTML(r, i, recipients.length)).join('');
-    $('recipient-counter').textContent = recipients.length >= MAX_RECIPIENTS ? 'Maximum of ' + MAX_RECIPIENTS + ' recipients reached.' : (recipients.length + ' recipient' + (recipients.length === 1 ? '' : 's'));
+    $('recipient-counter').textContent = recipients.length >= MAX_RECIPIENTS
+      ? 'Maximum of ' + MAX_RECIPIENTS + ' recipients reached.'
+      : countWordCap(recipients.length) + ' recipient' + (recipients.length === 1 ? '' : 's');
     $('btn-add-recipient').disabled = recipients.length >= MAX_RECIPIENTS;
     // Wire up remove buttons
     list.querySelectorAll('[data-remove]').forEach(btn => {
@@ -372,18 +405,22 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     if (currentStep === 2) { return contentMode === 'write' ? v('letter-body').length > 0 : uploadedFile !== null; }
     return true;
   }
+  // "Continue to <next step>" labels and the ghost back-link labels, per step.
+  const CONTINUE_LABELS = ['Continue to recipients →', 'Continue to content →', 'Continue to review →'];
+  const BACK_LABELS = ['', '← Sender', '← Recipients', '← Content'];
+  let sendProgressLabel = '';  // "Sending 1 of 2…" shown on the send button mid-batch
   function refreshNextBtn() {
     const btn = $('btn-next');
-    if (currentStep < 3) { btn.disabled = !canProceed(); btn.textContent = 'Continue →'; btn.classList.remove('live'); }
+    if (currentStep < 3) { btn.disabled = !canProceed(); btn.textContent = CONTINUE_LABELS[currentStep]; btn.classList.remove('live'); }
     else if (currentStep === 3) {
       const gate = verificationGate();
       btn.disabled = sending || !hasKey() || gate.pending || (gate.blocked && !$('verify-ack').checked);
       const n = readAllRecipients().length;
-      const label = n === 1 ? 'Letter' : (n + ' Letters');
-      btn.textContent = sending ? 'Sending…'
+      btn.textContent = sending ? (sendProgressLabel || 'Sending…')
         : gate.pending ? 'Verifying addresses…'
-        : (isLive() ? ('Mail ' + label + ' (Live)') : ('Mail ' + label + ' (Test)'));
-      btn.classList.toggle('live', isLive()); // Live mode wears the wax (styling class only)
+        : ('Send ' + countWord(n) + ' letter' + (n === 1 ? '' : 's'));
+      // In live mode the send button wears the magenta: real postage at stake.
+      btn.classList.toggle('live', isLive());
     }
   }
   function goToStep(n, focus) {
@@ -395,14 +432,16 @@ import { confirmDuplicateSends } from './duplicate.mjs';
       // Expose the active step to assistive tech (the visual state alone is silent).
       if (i === n) l.setAttribute('aria-current', 'step'); else l.removeAttribute('aria-current');
     }
-    const pct = n === 0 ? 0 : n === 1 ? 33.33 : n === 2 ? 66.66 : 100;
-    $('steps-fill').style.width = pct + '%';
     $('nav-bar').classList.toggle('is-hidden', n === 4);
     $('steps-bar').classList.toggle('is-hidden', n === 4);
-    $('btn-back').disabled = n === 0;
+    // Footer left slot: the italic "Step one of four" note on the first step,
+    // the ghost back link (labeled with the previous step's name) after it.
+    $('step-note').classList.toggle('is-hidden', n !== 0);
+    $('btn-back').classList.toggle('is-hidden', n === 0);
+    if (n > 0 && n < 4) $('btn-back').textContent = BACK_LABELS[n];
     if (n === 3) populateReview();
     refreshNextBtn();
-    const p = panels[n]; if (p) { p.classList.remove('animate-in'); void p.offsetWidth; p.classList.add('animate-in'); }
+    const p = panels[n];
     // On a user-driven step change, land focus on the new step's heading so
     // keyboard/screen-reader users are told where they are (skipped on first
     // paint so the page doesn't steal focus on load).
@@ -421,52 +460,89 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     h += esc(d.city) + ', ' + esc(d.state) + ' ' + esc(d.zip);
     return h;
   }
+  // The recipient block on the review page: address only (the name sits on the
+  // baseline row beside the deliverability tag).
+  function formatAddrLines(d) {
+    const parts = [];
+    if (d.company) parts.push(esc(d.company));
+    parts.push(esc(d.line1) + (d.line2 ? ', ' + esc(d.line2) : ''));
+    parts.push(esc(d.city) + ', ' + esc(d.state) + ' ' + esc(d.zip));
+    return parts.join('<br/>');
+  }
+  // Long-form date for the letter sheet, e.g. "July 21, 2026". The scheduled
+  // send date when set (that is the day it goes to press), else today.
+  function letterSheetDate() {
+    const sd = $('opt-send-date').value;
+    const d = sd ? parseLobDate(sd) : new Date();
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' });
+  }
   function populateReview() {
     $('review-from').innerHTML = formatAddrInline(getFrom());
     const rs = readAllRecipients();
-    $('review-to-count').textContent = '(' + rs.length + ')';
+    $('review-to-count').textContent = countWord(rs.length);
     const list = $('review-recipients');
     list.className = 'review-recipients' + (rs.length > 1 ? ' cols-2' : '');
-    list.innerHTML = rs.map((r, i) =>
-      '<div class="addr-card">' +
-        '<div class="addr-card-label"><span>To</span>' + (rs.length > 1 ? '<span class="recipient-idx">#' + (i + 1) + '</span>' : '') + '</div>' +
-        '<div class="addr-card-body">' + formatAddrInline(r) + '</div>' +
+    list.innerHTML = rs.map((r) =>
+      '<div class="review-r">' +
+        '<div class="review-r-head">' +
+          '<span class="review-r-name">' + esc(r.name) + '</span>' +
+          '<span class="tag tag-neutral" id="verify-tag-' + esc(r.id) + '"></span>' +
+        '</div>' +
+        '<div class="review-r-addr">' + formatAddrLines(r) + '</div>' +
         '<div class="verify-line" id="verify-r-' + esc(r.id) + '" role="status" aria-live="polite"></div>' +
       '</div>'
     ).join('');
     runReviewVerification(rs);
 
+    // The letter as it prints: sender block + date, the body, the sheet footer.
+    const from = getFrom();
+    const senderLines = [from.name, from.company, from.line1 + (from.line2 ? ', ' + from.line2 : ''), from.city + ', ' + from.state + ' ' + from.zip]
+      .filter(Boolean).map(esc).join('<br/>');
+    const sheetTop = '<div class="letter-sheet-top">' +
+      '<div class="letter-sheet-sender">' + senderLines + '</div>' +
+      '<div class="letter-sheet-date">' + esc(letterSheetDate()) + '</div>' +
+    '</div>';
+    const sheetFoot = '<div class="letter-sheet-foot"><span>Page 1 of 1</span><span>8.5 × 11″ · Letter</span></div>';
     if (contentMode === 'write') {
       const b = v('letter-body');
-      $('review-body').innerHTML = b ? esc(b) : '<span class="empty">No content</span>';
+      $('review-body').innerHTML = sheetTop +
+        '<div class="letter-sheet-body">' + (b ? esc(b) : '<em>No content</em>') + '</div>' + sheetFoot;
     } else if (uploadedFile) {
-      $('review-body').innerHTML = '<div style="display:flex;align-items:center;gap:14px;padding:8px 0"><div class="file-icon" style="width:40px;height:40px">' + esc(uploadedFile.type.toUpperCase()) + '</div><div><div style="font-weight:600;font-size:14px;color:#0f1419">' + esc(uploadedFile.name) + '</div><div style="font-size:12px;color:#9ca0a8">' + formatFileSize(uploadedFile.size) + '</div></div></div>';
+      $('review-body').innerHTML = sheetTop +
+        '<div class="file-row" style="border-bottom:none;padding:0">' +
+          '<span class="pdf-stamp">PDF</span>' +
+          '<div style="flex:1;min-width:0"><div class="file-row-name">' + esc(uploadedFile.name) + '</div>' +
+          '<div class="file-row-size">' + formatFileSize(uploadedFile.size) + ' · prints as uploaded</div></div>' +
+        '</div>' + sheetFoot;
     }
-    const ml = MAIL_TYPE_LABELS;
-    const el = EXTRA_SERVICE_LABELS;
-    const tags = [];
-    tags.push(rs.length + ' recipient' + (rs.length === 1 ? '' : 's'));
-    tags.push(contentMode === 'upload' ? 'Uploaded PDF' : 'Written letter');
-    tags.push(ml[$('opt-mail-type').value] || '');
-    tags.push($('opt-color').checked ? 'Color' : 'Black & white');
-    tags.push($('opt-double').checked ? 'Double-sided' : 'Single-sided');
-    const es = $('opt-extra-service').value; if (es) tags.push(el[es]);
-    tags.push($('opt-use-type').value === 'marketing' ? 'Marketing' : 'Operational');
-    if ($('opt-address-placement').value === 'insert_blank_page') tags.push('Blank address page');
-    if ($('opt-reply-envelope').checked) tags.push('Reply envelope (perforated pg 1)');
-    const sd = $('opt-send-date').value; if (sd) tags.push('Send ' + sd);
-    const desc = $('opt-description').value.trim(); if (desc) tags.push('“' + desc + '”');
-    const modeTag = isLive() ? '<span class="mode-live">Live — real letters</span>' : '<span class="mode-test">Test mode</span>';
-    const htmlTags = tags.filter(Boolean).map(esc);
-    htmlTags.push(modeTag);
-    $('review-meta').innerHTML = htmlTags.join('<span class="sep">·</span>');
+
+    // Summary line: "Two recipients · First Class · Certified Mail · Color ·
+    // Single-sided · Live — real postage" (the warning only in live mode).
+    const bits = [];
+    bits.push(countWordCap(rs.length) + ' recipient' + (rs.length === 1 ? '' : 's'));
+    if (contentMode === 'upload') bits.push('Uploaded PDF');
+    bits.push(MAIL_TYPE_LABELS[segGet('opt-mail-type')] || '');
+    const es = $('opt-extra-service').value; if (es) bits.push(EXTRA_SERVICE_LABELS[es]);
+    bits.push($('opt-color').checked ? 'Color' : 'Black & white');
+    bits.push($('opt-double').checked ? 'Double-sided' : 'Single-sided');
+    if (segGet('opt-use-type') === 'marketing') bits.push('Marketing');
+    if ($('opt-address-placement').value === 'insert_blank_page') bits.push('Blank address page');
+    if ($('opt-reply-envelope').checked) bits.push('Reply envelope');
+    const sd = $('opt-send-date').value; if (sd) bits.push('Mails ' + formatShortDate(sd));
+    const htmlBits = bits.filter(Boolean).map(esc);
+    htmlBits.push(isLive() ? '<strong class="live-warn">Live — real postage</strong>' : 'Proof press · Test');
+    $('review-meta').innerHTML = htmlBits.join(' · ');
   }
 
   function showError(m) { $('error-box').textContent = m; $('error-box').classList.remove('is-hidden'); }
   function hideError() { $('error-box').classList.add('is-hidden'); }
-  function setProgress(text, show) {
+  function setProgress(text, show, btnLabel) {
     $('send-progress').classList.toggle('is-hidden', !show);
     $('send-progress-text').textContent = text || 'Sending…';
+    // The send button itself carries the batch count ("Sending 1 of 2…").
+    sendProgressLabel = show ? (btnLabel || '') : '';
+    if (sending) refreshNextBtn();
   }
 
   // ═══ File upload ═══
@@ -547,8 +623,8 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     fields.push(['from[address_city]', from.city]); fields.push(['from[address_state]', from.state]); fields.push(['from[address_zip]', from.zip]);
     fields.push(['color', $('opt-color').checked.toString()]);
     fields.push(['double_sided', $('opt-double').checked.toString()]);
-    fields.push(['mail_type', $('opt-mail-type').value]);
-    fields.push(['use_type', $('opt-use-type').value]);
+    fields.push(['mail_type', segGet('opt-mail-type')]);
+    fields.push(['use_type', segGet('opt-use-type')]);
     fields.push(['address_placement', $('opt-address-placement').value]);
     const es = $('opt-extra-service').value; if (es) fields.push(['extra_service', es]);
     // Reply envelope + its required perforation, coupled so one can never be
@@ -635,7 +711,8 @@ import { confirmDuplicateSends } from './duplicate.mjs';
       for (let i = 0; i < rs.length; i++) {
         const to = rs[i];
         const fingerprint = fingerprints[i];
-        setProgress('Sending letter ' + (i + 1) + ' of ' + rs.length + ' — ' + (to.name || 'recipient'), true);
+        setProgress('Sending letter ' + (i + 1) + ' of ' + rs.length + ' — ' + (to.name || 'recipient'), true,
+          'Sending ' + (i + 1) + ' of ' + rs.length + '…');
         // Reused across retries AND across reloads: the key is persisted by
         // fingerprint before the send fires, so an interrupted send is safe to
         // re-attempt and Lob de-dupes an identical resubmit within 24h.
@@ -669,7 +746,7 @@ import { confirmDuplicateSends } from './duplicate.mjs';
             date_sent: data.date_created || new Date().toISOString(),
             send_date: data.send_date || null,
             expected_delivery_date: data.expected_delivery_date || null,
-            mail_type: data.mail_type || $('opt-mail-type').value,
+            mail_type: data.mail_type || segGet('opt-mail-type'),
             extra_service: data.extra_service || ($('opt-extra-service').value || null),
             tracking_number: data.tracking_number || null,
             description: data.description || ($('opt-description').value.trim() || ''),
@@ -746,54 +823,65 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     const ok = results.filter(r => r.success).length;
     const fail = results.length - ok;
     const live = isLive();
+    const n = results.length;
 
-    const icon = $('success-icon');
-    icon.classList.toggle('partial', fail > 0);
+    // Kicker: "Accepted · 2 of 2" in cyan; magenta when anything failed. When
+    // nothing was accepted, "Accepted · 0 of N" reads as a contradiction, so the
+    // total-failure case gets its own honest phrasing.
+    const kicker = $('success-kicker');
+    kicker.textContent = (ok === 0 ? 'None accepted · 0 of ' : 'Accepted · ' + ok + ' of ') + n;
+    kicker.classList.toggle('partial', fail > 0);
 
+    const mailClass = MAIL_TYPE_LABELS[segGet('opt-mail-type')] || 'First Class';
     if (fail === 0) {
-      $('success-title').textContent = results.length === 1 ? 'Letter Queued' : (results.length + ' Letters Queued');
-      $('success-desc').textContent = live ? 'Submitted to Lob and will be printed and mailed via USPS.' : 'Test mode — no real letters mailed. Switch to a live_ API key to send real mail.';
+      $('success-title').textContent = 'Gone to press.';
+      const lead = n === 1 ? 'The letter was accepted and queued'
+        : n === 2 ? 'Both letters were accepted and queued'
+        : 'All ' + countWord(n) + ' letters were accepted and queued';
+      const tail = ' for USPS ' + mailClass + ' delivery. Tracking numbers appear in the record once ' +
+        (n === 1 ? 'the letter enters' : 'each letter enters') + ' the mail stream.';
+      $('success-desc').textContent = lead + tail + (live ? '' : ' Proof press: test mode, nothing is really mailed.');
     } else if (ok === 0) {
-      $('success-title').textContent = 'Send Failed';
-      $('success-desc').textContent = 'None of the letters were submitted. See errors below.';
+      $('success-title').textContent = 'Nothing went to press.';
+      $('success-desc').textContent = 'None of the letters were submitted. See the errors below.';
     } else {
-      $('success-title').textContent = ok + ' of ' + results.length + ' Queued';
-      $('success-desc').textContent = 'Some letters could not be submitted. See details below.';
+      $('success-title').textContent = 'Partly gone to press.';
+      $('success-desc').textContent = 'Some letters could not be submitted. See the details below.';
     }
 
-    $('success-results').innerHTML = results.map(r => {
-      // "Queued", not "Mailed": a create response only means Lob accepted the
-      // job, not that anything is in the mail yet. The honest label matches the
-      // "Letter Queued" success title.
-      // Three outcomes: Queued (accepted by Lob), Failed (Lob rejected this
-      // letter), and Not sent (a shared option was rejected on an earlier letter
-      // and the batch was halted, so this one was never attempted).
-      const badge = r.success ? '<span class="status-badge success">Queued</span>'
-        : (r.notAttempted ? '<span class="status-badge muted">Not sent</span>' : '<span class="status-badge error">Failed</span>');
-      const sub = r.success ? '<div class="result-item-sub">' + esc(r.data.id) + '</div>' : '<div class="result-item-error">' + esc(r.error) + '</div>';
-      let track = '';
-      if (r.success && isTrackedService(r.data && r.data.extra_service)) {
+    // The ledger of outcomes. "Queued", not "Mailed": a create response only
+    // means Lob accepted the job, not that anything is in the mail yet. Three
+    // outcomes: Queued (accepted), Failed (Lob rejected this letter), and Not
+    // sent (a shared option was rejected earlier and the batch was halted).
+    const rows = results.map(r => {
+      const tag = r.success ? '<span class="tag tag-accent status-badge">Queued</span>'
+        : (r.notAttempted ? '<span class="tag tag-neutral status-badge">Not sent</span>'
+          : '<span class="tag tag-accent-2 status-badge">Failed</span>');
+      let notes = '';
+      if (!r.success) notes = '<div class="result-error">' + esc(r.error) + '</div>';
+      else if (isTrackedService(r.data && r.data.extra_service)) {
         const tn = r.data && r.data.tracking_number;
         if (tn && live) {
-          track = '<div class="result-item-track"><span class="key">Tracking</span> ' +
-            '<a href="' + esc(uspsTrackingUrl(tn)) + '" target="_blank" rel="noopener">' + esc(tn) + '</a>' +
-            '<button class="btn-mini" type="button" data-copy="' + esc(tn) + '">Copy</button></div>';
+          notes = '<div class="result-note">Tracking <a href="' + esc(uspsTrackingUrl(tn)) + '" target="_blank" rel="noopener">' + esc(tn) + '</a>' +
+            ' <button class="linklike tracking-copy" type="button" data-copy="' + esc(tn) + '">Copy</button></div>';
         } else if (live) {
-          track = '<div class="result-item-note">Tracking number will appear in History once USPS assigns it (up to ~3 business days). Use “Refresh all” there to check.</div>';
+          notes = '<div class="result-note">Tracking number appears in the record once USPS assigns it (up to ~3 business days).</div>';
         } else {
-          track = '<div class="result-item-note">Test mode — test sends don’t get a real tracking number.</div>';
+          notes = '<div class="result-note">Proof press — test sends don’t get a real tracking number.</div>';
         }
       }
-      return (
-        '<div class="result-item">' +
-          '<div class="result-item-left">' +
-            '<div class="result-item-name">' + esc(r.recipient.name || '(unnamed)') + '</div>' +
-            sub + track +
-          '</div>' +
-          badge +
-        '</div>'
-      );
+      const name = esc(r.recipient.name || '(unnamed)') + (r.recipient.company ? ' — ' + esc(r.recipient.company) : '');
+      return '<tr>' +
+        '<td><span class="ledger-name">' + name + '</span>' + notes + '</td>' +
+        '<td class="ledger-id">' + (r.success ? esc(r.data.id) : '') + '</td>' +
+        '<td>' + tag + '</td>' +
+      '</tr>';
     }).join('');
+    $('success-results').innerHTML =
+      '<div class="table-scroll"><table class="table success-table">' +
+        '<thead><tr><th style="width:44%">Recipient</th><th>Letter №</th><th>Status</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table></div>';
     $('success-results').querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copyText(b.getAttribute('data-copy'), b)));
     // Offer an idempotency-preserving retry only when something failed.
     const retryBtn = $('btn-retry-failed');
@@ -801,127 +889,213 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     goToStep(4, true);
   }
 
-  // ═══ History view ═══
+  // ═══ History view: the ledger ═══
+  // Status variant -> design-system tag. The variants (and the honest labels
+  // inside them) come from deriveStatus and are unchanged; only the tag skin is
+  // mapped here. Magenta stays reserved for failure states.
+  const STATUS_TAG = { success: 'tag-accent', progress: 'tag-outline', muted: 'tag-neutral', error: 'tag-accent-2' };
+  // Timeline dots: duotone filled for the latest event, halo-only for earlier
+  // ones (the two inline SVGs specified by the handoff).
+  const DOT_LATEST = '<svg width="13" height="13" viewBox="0 0 256 256" aria-hidden="true"><circle cx="128" cy="128" r="100" fill="#0088b0" opacity="0.2"></circle><circle cx="128" cy="128" r="48" fill="#0088b0"></circle></svg>';
+  const DOT_EARLIER = '<svg width="13" height="13" viewBox="0 0 256 256" aria-hidden="true"><circle cx="128" cy="128" r="100" fill="#0088b0" opacity="0.2"></circle></svg>';
+  // Chevron for the per-row disclosure button; CSS rotates it when expanded.
+  const CHEVRON = '<svg width="12" height="8" viewBox="0 0 12 8" fill="none" aria-hidden="true"><path d="M1 1.5l5 5 5-5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  function formatEventTime(s) {
+    // Guard the falsy case FIRST: new Date(0) is a valid Date (the Unix epoch),
+    // so `new Date(s || 0)` would render "Jan 1, 12:00 AM" for a missing time
+    // instead of an empty string.
+    if (!s) return '';
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ', ' +
+      d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  }
+  // The "Created" column: Lob's creation date (date_sent IS Lob's date_created,
+  // see mapLobLetter). Honest header: a create is not a mailing, so this is never
+  // filed under "Mailed". The scheduled/mailed lifecycle lives in the Status
+  // column (deriveStatus), never inferred from this timestamp.
+  function createdCell(h) {
+    return formatShortDate(h.date_sent);
+  }
+  // Cancel is offered only while cancellation can plausibly succeed: the letter
+  // has no tracking events yet (nothing in the USPS stream) and is not already
+  // canceled. Lob remains the authority; a rejected cancel is surfaced as-is.
+  function canCancel(h) {
+    return LETTER_ID_RE.test(h.id) && !h.deleted && !(Array.isArray(h.tracking_events) && h.tracking_events.length > 0);
+  }
+  function detailRowHTML(h) {
+    const liveEntry = h.mode === 'live';
+    let left = '<div class="tracking-label">Tracking</div>';
+    if (h.tracking_number) {
+      const copyBtn = '<button class="linklike tracking-copy" type="button" data-copy="' + esc(h.tracking_number) + '">Copy</button>';
+      if (liveEntry) {
+        left += '<div class="tracking-num"><a class="tracking-link" href="' + esc(uspsTrackingUrl(h.tracking_number)) + '" target="_blank" rel="noopener">' + esc(h.tracking_number) + '</a>' + copyBtn + '</div>';
+        if (h.extra_service === 'certified_return_receipt') {
+          left += '<div class="tracking-hint">The signed receipt isn’t exposed by Lob; open USPS tracking and choose “Return Receipt Email” to receive the signature PDF.</div>';
+        }
+      } else {
+        left += '<div class="tracking-num"><span class="tracking-link">' + esc(h.tracking_number) + '</span>' + copyBtn + '</div>' +
+          '<div class="tracking-hint">Proof press — not a real USPS number.</div>';
+      }
+    } else {
+      left += '<span class="tag tag-outline">Awaiting tracking number</span>';
+      if (isTrackedService(h.extra_service) && liveEntry) {
+        left += '<div class="tracking-hint">Certified and registered numbers can take up to ~3 business days to appear.</div>';
+      }
+    }
+    let right = '';
+    if (Array.isArray(h.tracking_events) && h.tracking_events.length > 0) {
+      const sorted = h.tracking_events.slice().sort((a, b) => new Date(b.time || b.date_created || 0) - new Date(a.time || a.date_created || 0));
+      right = '<div class="timeline">' + sorted.map((e, i) =>
+        '<div class="timeline-event' + (i === 0 ? ' latest' : '') + '">' + (i === 0 ? DOT_LATEST : DOT_EARLIER) +
+          '<span>' + esc(e.name || e.type || 'Event') + (e.location ? ' — ' + esc(e.location) : '') + '</span>' +
+          '<span class="timeline-when">' + esc(formatEventTime(e.time || e.date_created)) + '</span>' +
+        '</div>'
+      ).join('') + '</div>';
+    } else {
+      right = '<div class="tracking-hint" style="margin-top:0">No tracking events yet' +
+        (h.expected_delivery_date ? ' · expected by ' + esc(formatShortDate(h.expected_delivery_date)) : '') + '.</div>';
+    }
+    return '<tr class="ledger-detail" id="detail-' + esc(h.id) + '" data-did="' + esc(h.id) + '"><td colspan="6">' +
+      '<div class="ledger-detail-grid"><div>' + left + '</div><div>' + right + '</div></div>' +
+    '</td></tr>';
+  }
   function renderHistory() {
     const list = $('history-list');
     const empty = $('history-empty');
     const emptyTitle = empty.querySelector('.history-empty-title');
     const emptyDesc = empty.querySelector('.history-empty-desc');
+    const composeFirst = $('btn-compose-first');
 
     if (history.length === 0) {
       empty.classList.remove('is-hidden');
       list.innerHTML = '';
+      let pristine = false;
       if (historyLoading) {
         emptyTitle.textContent = 'Loading…';
         emptyDesc.textContent = 'Fetching your mail from Lob.';
       } else if (!hasKey()) {
-        emptyTitle.textContent = 'API key required';
+        emptyTitle.textContent = 'API key required.';
         emptyDesc.textContent = 'Enter your Lob API key above to load your mail history.';
       } else if (historyError) {
-        emptyTitle.textContent = 'Couldn’t load history';
+        emptyTitle.textContent = 'Couldn’t load the record.';
         emptyDesc.textContent = historyError;
       } else {
-        emptyTitle.textContent = 'No letters found';
-        emptyDesc.textContent = 'No ' + (historyEnv === 'live' ? 'live' : 'test') + ' letters on this Lob account for the API key above.';
+        pristine = true;
+        emptyTitle.textContent = 'Nothing has gone to press yet.';
+        emptyDesc.textContent = 'Letters you send will appear here with live USPS tracking and an exportable proof package.';
       }
+      // "Compose the first letter" belongs to the genuinely-empty record, not
+      // to loading/error/keyless states.
+      if (composeFirst) composeFirst.classList.toggle('is-hidden', !pristine);
       $('history-last-refreshed').textContent = '';
       return;
     }
     empty.classList.add('is-hidden');
 
-    const cards = history.map(h => {
+    const rows = history.map(h => {
       const status = deriveStatus(h);
-      const badge = '<span class="status-badge ' + status.variant + '">' + esc(status.label) + '</span>';
-      const metaBits = [];
-      // True field names: date_sent is Lob's date_created (see mapLobLetter), so
-      // it is labeled "Created", never "Sent". Send date and expected delivery
-      // are shown under their own names when present.
-      metaBits.push('<span><span class="key">Created</span> ' + esc(formatShortDate(h.date_sent)) + '</span>');
-      if (h.send_date) metaBits.push('<span><span class="key">Send date</span> ' + esc(formatShortDate(h.send_date)) + '</span>');
-      if (h.expected_delivery_date) metaBits.push('<span><span class="key">Expected delivery</span> ' + esc(formatShortDate(h.expected_delivery_date)) + '</span>');
-      if (h.mail_type) {
-        metaBits.push('<span>' + esc(MAIL_TYPE_LABELS[h.mail_type] || h.mail_type) + '</span>');
-      }
-      if (h.extra_service) {
-        metaBits.push('<span>' + esc(EXTRA_SERVICE_LABELS[h.extra_service] || h.extra_service) + '</span>');
-      }
-      metaBits.push('<span><code>' + esc(h.id) + '</code></span>');
-      if (h.mode === 'test') metaBits.push('<span style="color:var(--text-muted)">Test</span>');
-
-      // Tracking number / pending state / return-receipt pointer
-      const tracked = isTrackedService(h.extra_service);
-      const liveEntry = h.mode === 'live';
-      let trackHtml = '';
-      if (h.tracking_number) {
-        if (liveEntry) {
-          const url = uspsTrackingUrl(h.tracking_number);
-          trackHtml = '<div class="letter-card-tracking">' +
-            '<div class="tracking-line"><span class="key">Tracking</span> ' +
-              '<a class="tracking-link" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(h.tracking_number) + '</a>' +
-              '<button class="btn-mini" type="button" data-copy="' + esc(h.tracking_number) + '">Copy</button>' +
-            '</div>';
-          if (h.extra_service === 'certified_return_receipt') {
-            trackHtml += '<div class="tracking-hint"><a href="' + esc(url) + '" target="_blank" rel="noopener">Return receipt ↗</a> — the signed receipt isn’t exposed by Lob; open USPS tracking and choose “Return Receipt Email” to receive the signature PDF.</div>';
-          }
-          trackHtml += '</div>';
-        } else {
-          // Test mode: Lob returns a dummy number — show it, but not as a USPS link.
-          trackHtml = '<div class="letter-card-tracking"><div class="tracking-line"><span class="key">Tracking</span> <code>' + esc(h.tracking_number) + '</code> <span class="tracking-hint" style="margin:0">test — not a real USPS number</span></div></div>';
-        }
-      } else if (tracked && liveEntry) {
-        trackHtml = '<div class="letter-card-tracking">' +
-          '<span class="tracking-pending">Tracking number pending</span>' +
-          '<div class="tracking-hint">Certified &amp; registered numbers can take up to ~3 business days to appear. Use “Refresh all” to check again.</div>' +
-        '</div>';
-      }
-
-      // Tracking events (if any)
-      let eventsHtml = '';
-      if (Array.isArray(h.tracking_events) && h.tracking_events.length > 0) {
-        const sorted = h.tracking_events.slice().sort((a, b) => new Date(b.time || b.date_created || 0) - new Date(a.time || a.date_created || 0));
-        eventsHtml = '<div class="tracking-events">' + sorted.slice(0, 4).map(e =>
-          '<div class="tracking-event"><span>' + esc(e.name || e.type || 'Event') + (e.location ? ' · ' + esc(e.location) : '') + '</span><span class="tracking-event-date">' + esc(formatShortDate(e.time || e.date_created)) + '</span></div>'
-        ).join('') + '</div>';
-      }
-
-      return (
-        '<div class="letter-card" data-lid="' + esc(h.id) + '">' +
-          '<div class="letter-card-top">' +
-            '<div style="flex:1;min-width:0">' +
-              '<div class="letter-card-name">' + esc(h.recipient_name || '(unnamed)') + (h.recipient_company ? ' <span style="font-weight:400;color:var(--text-dim);font-size:13px"> · ' + esc(h.recipient_company) + '</span>' : '') + '</div>' +
-              '<div class="letter-card-addr">' + esc(h.recipient_address || '') + '</div>' +
-            '</div>' +
-            '<div class="letter-card-actions">' +
-              badge +
-              '<button class="btn-mini" type="button" data-refresh="' + esc(h.id) + '">Refresh</button>' +
-              (LETTER_ID_RE.test(h.id) ? '<button class="btn-mini" type="button" data-proof="' + esc(h.id) + '" title="Download a self-contained evidence bundle (request bytes, Lob response, rendered PDF, tracking, verifications, audit log) as a ZIP.">Export proof</button>' : '') +
-              '<button class="btn-mini danger" type="button" data-delete="' + esc(h.id) + '">Remove</button>' +
-            '</div>' +
-          '</div>' +
-          '<div class="letter-card-meta">' + metaBits.join('<span class="sep">·</span>') + '</div>' +
-          trackHtml +
-          eventsHtml +
-        '</div>'
-      );
+      const tag = '<span class="tag ' + (STATUS_TAG[status.variant] || 'tag-neutral') + ' status-badge ' + esc(status.variant) + '">' + esc(status.label) + '</span>';
+      const service = h.extra_service ? (EXTRA_SERVICE_LABELS[h.extra_service] || h.extra_service)
+        : (MAIL_TYPE_LABELS[h.mail_type] || h.mail_type || '');
+      const name = esc(h.recipient_name || '(unnamed)') + (h.recipient_company ? ' — ' + esc(h.recipient_company) : '');
+      const expanded = expandedIds.has(h.id);
+      // A REAL disclosure button carries the keyboard/AT affordance (the row is a
+      // mouse convenience only): keeping the toggle a <button> avoids nesting the
+      // Export/Cancel buttons inside a role=button row.
+      const toggleBtn = '<button class="ledger-toggle" type="button" data-toggle="' + esc(h.id) + '"' +
+        ' aria-expanded="' + (expanded ? 'true' : 'false') + '" aria-controls="detail-' + esc(h.id) + '"' +
+        ' aria-label="' + (expanded ? 'Hide' : 'Show') + ' tracking detail for ' + esc(h.recipient_name || 'this letter') + '">' + CHEVRON + '</button>';
+      const actions = toggleBtn +
+        (LETTER_ID_RE.test(h.id) ? '<button class="btn btn-ghost" type="button" data-proof="' + esc(h.id) + '" title="Download a self-contained evidence bundle (request bytes, Lob response, rendered PDF, tracking, verifications, audit log) as a ZIP.">Export proof</button>' : '') +
+        (canCancel(h) ? '<button class="btn btn-ghost danger" type="button" data-cancel="' + esc(h.id) + '">Cancel</button>' : '');
+      const main = '<tr class="ledger-row" data-lid="' + esc(h.id) + '">' +
+        '<td style="width:34%"><div class="ledger-name">' + name + '</div><div class="ledger-addr">' + esc(h.recipient_address || '') + '</div></td>' +
+        '<td class="ledger-id">' + esc(h.id) + '</td>' +
+        '<td class="ledger-cell">' + esc(service) + '</td>' +
+        '<td class="ledger-cell">' + esc(createdCell(h)) + '</td>' +
+        '<td>' + tag + '</td>' +
+        '<td class="ledger-actions">' + actions + '</td>' +
+      '</tr>';
+      return main + (expanded ? detailRowHTML(h) : '');
     }).join('');
 
     const moreHtml = historyNextUrl ? '<div class="history-more"><button class="btn btn-secondary" id="btn-load-more" type="button">Load older letters</button></div>' : '';
-    list.innerHTML = cards + moreHtml;
+    list.innerHTML =
+      '<div class="table-scroll"><table class="table">' +
+        '<thead><tr><th style="width:34%">Recipient</th><th>Letter №</th><th>Service</th><th>Created</th><th>Status</th><th></th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table></div>' + moreHtml;
 
-    list.querySelectorAll('[data-refresh]').forEach(b => b.addEventListener('click', () => refreshOne(b.getAttribute('data-refresh'))));
-    list.querySelectorAll('[data-delete]').forEach(b => b.addEventListener('click', () => removeFromHistory(b.getAttribute('data-delete'))));
+    // Row click toggles the tracking detail (a mouse convenience); the keyboard/AT
+    // path is the per-row disclosure <button>. Clicks on any button/link inside
+    // the row keep their own action and never toggle.
+    list.querySelectorAll('tr.ledger-row').forEach(tr => {
+      tr.addEventListener('click', (e) => {
+        if (e.target.closest('button, a')) return;
+        toggleDetail(tr.getAttribute('data-lid'));
+      });
+    });
+    list.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); toggleDetail(b.getAttribute('data-toggle')); }));
     list.querySelectorAll('[data-proof]').forEach(b => b.addEventListener('click', () => exportProof(b.getAttribute('data-proof'), b)));
-    list.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copyText(b.getAttribute('data-copy'), b)));
+    list.querySelectorAll('[data-cancel]').forEach(b => b.addEventListener('click', () => cancelLetter(b.getAttribute('data-cancel'), b)));
+    list.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); copyText(b.getAttribute('data-copy'), b); }));
     const moreBtn = $('btn-load-more');
     if (moreBtn) moreBtn.addEventListener('click', () => loadAccountHistory({ reset: false }));
 
-    // Summary: count + environment of the loaded list
+    // Summary: count + environment + when the list was last pulled from Lob.
     if (historyError) {
       $('history-last-refreshed').textContent = historyError;
     } else {
       const envLabel = historyEnv === 'live' ? 'live' : 'test';
       const shown = history.length;
-      $('history-last-refreshed').textContent = shown + (historyNextUrl ? '+' : '') + ' ' + envLabel + ' letter' + (shown === 1 ? '' : 's');
+      let text = shown + (historyNextUrl ? '+' : '') + ' ' + envLabel + ' letter' + (shown === 1 ? '' : 's');
+      if (historyFetchedAt) text += ' · updated ' + historyFetchedAt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+      $('history-last-refreshed').textContent = text;
+    }
+  }
+
+  // Re-focus a row's disclosure button after renderHistory() rebuilds the table.
+  // renderHistory replaces innerHTML, so the pre-toggle button node is gone;
+  // without this, keyboard focus would fall back to <body> on every toggle.
+  function focusToggle(id) {
+    const sel = window.CSS && CSS.escape ? CSS.escape(id) : JSON.stringify(String(id));
+    const b = $('history-list').querySelector('[data-toggle=' + sel + ']');
+    if (b) b.focus();
+  }
+  async function toggleDetail(id) {
+    if (!id) return;
+    const willExpand = !expandedIds.has(id);
+    if (willExpand) expandedIds.add(id); else expandedIds.delete(id);
+    renderHistory(); // show/hide the row immediately (with whatever is cached)
+    focusToggle(id);
+    if (willExpand) {
+      const h = history.find(x => x.id === id);
+      if (h && hasKey() && LETTER_ID_RE.test(id)) {
+        await fetchStatusForLetter(h); // pull current tracking for the open row
+        if (expandedIds.has(id)) { renderHistory(); focusToggle(id); }
+      }
+    }
+  }
+
+  // Cancel a letter at Lob (DELETE /v1/letters/<id>). Destructive and only
+  // meaningful before the letter enters production, so it asks first; Lob is
+  // the authority on whether cancellation is still possible.
+  async function cancelLetter(id, btn) {
+    if (!LETTER_ID_RE.test(id)) return;
+    if (!hasKey()) { alert('Enter your Lob API key at the top of the page to cancel a letter.'); return; }
+    if (!confirm('Cancel this letter at Lob? If it has not entered production, it will not be printed or mailed.')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Canceling…'; }
+    try {
+      const resp = await fetch(LOB_BASE + '/v1/letters/' + encodeURIComponent(id), { method: 'DELETE', headers: authHeaders() });
+      const data = await resp.json();
+      if (data && data.error) throw new Error((data.error && data.error.message) || 'Cancel failed');
+      const h = history.find(x => x.id === id);
+      if (h) h.deleted = true;
+      renderHistory();
+    } catch (e) {
+      alert('Cancel failed: ' + (e.message || 'network error'));
+      renderHistory();
     }
   }
 
@@ -975,14 +1149,6 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     }
   }
 
-  function removeFromHistory(id) {
-    if (!confirm('Hide this letter from the list? It remains on your Lob account and will reappear when you reload History.')) return;
-    history = history.filter(h => h.id !== id);
-    optimistic = optimistic.filter(h => h.id !== id);
-    updateHistoryCount();
-    renderHistory();
-  }
-
   async function fetchStatusForLetter(h) {
     try {
       const resp = await fetch(LOB_BASE + '/v1/letters/' + encodeURIComponent(h.id), {
@@ -1003,16 +1169,6 @@ import { confirmDuplicateSends } from './duplicate.mjs';
       h.fetch_error = e.message || 'Network error';
       h.last_refreshed = new Date().toISOString();
     }
-  }
-
-  async function refreshOne(id) {
-    if (!hasKey()) { alert('Enter your Lob API key at the top of the page to refresh status.'); return; }
-    const h = history.find(x => x.id === id);
-    if (!h) return;
-    const btn = document.querySelector('[data-refresh="' + id + '"]');
-    if (btn) { btn.disabled = true; btn.textContent = '…'; }
-    await fetchStatusForLetter(h);
-    renderHistory();
   }
 
   async function refreshAll() {
@@ -1066,10 +1222,17 @@ import { confirmDuplicateSends } from './duplicate.mjs';
   })();
 
   function updateEnvBadge() {
+    // Test wears the neutral tag reading "Proof press · Test"; Live wears the
+    // magenta tag reading "Live · real postage". #env-label always holds exactly
+    // "Test" or "Live" (the classifier's verdict); the surrounding copy lives in
+    // the sibling note spans, so the label a test asserts on stays unambiguous.
+    // NBSPs, not plain spaces: the .tag is inline-flex, which strips ordinary
+    // whitespace at the span boundaries.
     const l = isLive();
-    $('env-dot').className = 'env-dot ' + (l ? 'live' : 'test');
-    $('env-badge').classList.toggle('live', l); // Live mode wears the wax (styling class only)
+    $('env-badge').className = 'tag ' + (l ? 'tag-accent-2 live' : 'tag-neutral');
+    $('env-note-pre').textContent = l ? '' : 'Proof press · ';
     $('env-label').textContent = l ? 'Live' : 'Test';
+    $('env-note-post').textContent = l ? ' · real postage' : '';
   }
   $('api-key-input').addEventListener('input', function() {
     updateEnvBadge();
@@ -1097,7 +1260,7 @@ import { confirmDuplicateSends } from './duplicate.mjs';
   // Refresh the next button when any other compose input changes
   document.addEventListener('input', function(e) {
     if (e.target.closest && e.target.closest('#recipients-list')) return; // already handled
-    if (e.target.classList && (e.target.classList.contains('field-input') || e.target.classList.contains('field-textarea'))) refreshNextBtn();
+    if (e.target.classList && (e.target.classList.contains('input') || e.target.classList.contains('letter-ruled'))) refreshNextBtn();
   });
 
   // Certified/Registered ride First Class: Lob rejects Standard plus an extra
@@ -1105,9 +1268,8 @@ import { confirmDuplicateSends } from './duplicate.mjs';
   // the class is forced and locked the moment an extra service is chosen.
   function syncMailClassLock() {
     const locked = !!$('opt-extra-service').value;
-    const mt = $('opt-mail-type');
-    if (locked) mt.value = 'usps_first_class';
-    mt.disabled = locked;
+    if (locked) segSet('opt-mail-type', 'usps_first_class');
+    segDisable('opt-mail-type', locked);
   }
   $('opt-extra-service').addEventListener('change', syncMailClassLock);
   // Checking/unchecking the undeliverable acknowledgment flips the send gate.
@@ -1127,8 +1289,10 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     // letter correctly reuses its key (Lob de-dupes) until the 24h window prunes it.
     renderRecipients();
     $('letter-body').value = '';
-    $('opt-color').checked = false; $('opt-double').checked = false; $('opt-reply-envelope').checked = false;
-    $('opt-mail-type').value = 'usps_first_class'; $('opt-extra-service').value = ''; $('opt-use-type').value = 'operational';
+    // Color defaults on — the compose screen presents color printing as the norm
+    // (see the initial checked state in index.html); reset returns to that norm.
+    $('opt-color').checked = true; $('opt-double').checked = false; $('opt-reply-envelope').checked = false;
+    segSet('opt-mail-type', 'usps_first_class'); $('opt-extra-service').value = ''; segSet('opt-use-type', 'operational');
     $('opt-address-placement').value = 'top_first_page'; $('opt-send-date').value = ''; $('opt-description').value = '';
     syncMailClassLock(); // values were reset programmatically (no change event), so re-derive the lock
     removeFile(); setMode('write'); hideError();
@@ -1137,6 +1301,7 @@ import { confirmDuplicateSends } from './duplicate.mjs';
   $('btn-view-history').addEventListener('click', () => setView('history'));
   $('btn-retry-failed').addEventListener('click', retryFailed);
   $('btn-refresh-all').addEventListener('click', refreshAll);
+  $('btn-compose-first').addEventListener('click', () => setView('compose'));
 
   // ═══ Init ═══
   // Learn whether the server holds a Lob key (PD_LOB_KEY) and its test/live
@@ -1154,6 +1319,7 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     if (currentView === 'history' && historyLoadedKey !== keyIdentity()) loadAccountHistory({ reset: true });
   }).catch(() => { /* config unavailable — paste-in only, as before */ });
   updateHistoryCount();
+  updateEnvBadge(); // paint the env tag at load; /api/config only repaints if a server key resolves
   syncMailClassLock(); // in case the browser restored a stale extra-service selection
   // Constrain the Send Date picker to the same window validateSendDate enforces:
   // minimum tomorrow (Lob rejects a same-day or past date), maximum 180 days out.
@@ -1171,4 +1337,8 @@ import { confirmDuplicateSends } from './duplicate.mjs';
   recipients = [{ id: nextRecipientId++, name: '', company: '', line1: '', line2: '', city: '', state: '', zip: '' }];
   renderRecipients();
   goToStep(0);
+  // Signal that the module has wired the app and painted the first step. Browser
+  // tests wait on this instead of a fixed timeout, closing the race where the
+  // suite drives the wizard before the module finished initializing.
+  document.body.setAttribute('data-app-ready', 'true');
 })();
