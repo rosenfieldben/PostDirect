@@ -128,7 +128,7 @@ npm run test:browser  # playwright test
 | `PD_SECRET`          | Yes      | (none)         | Secret key used to **sign** session cookies (HMAC-SHA256, nothing is encrypted), at least 32 characters (e.g. `openssl rand -hex 32`). Startup refuses unset or shorter values, since a short secret makes cookie signatures brute-forceable offline. Must be stable across restarts, or every session is invalidated on restart. |
 | `PD_INSECURE_LOCAL_DEMO` | No   | (none)         | `1` skips the three credential checks above for a LOCAL DEMO ONLY: defaults are allowed, the server binds `127.0.0.1` only, and a loud warning is printed at startup. Never set it on a host other machines can reach. |
 | `PD_LOB_KEY`         | No       | —          | Lob API key held server-side. When set, the proxy injects it into Lob requests that don't carry their own key, so the key never reaches the browser. A key pasted into the UI still overrides it. The UI shows Test/Live based on the key's `test_`/`live_` prefix. |
-| `PD_DATA_DIR`        | No       | `<app>/data` | Directory for the durable send store: an append-only `audit.log` plus content-addressed `blobs/`. Created mode `0700` at startup; an unwritable path is a fatal startup error. Holds client PII and the exact documents mailed, so it lives outside `public/` and is never web-served. Back it up and protect it. See "Records and retention". |
+| `PD_DATA_DIR`        | No       | `<app>/data` | Directory for the durable send store: an append-only `audit.log` plus content-addressed `blobs/`. Created mode `0700`, and re-tightened to `0700` (with `audit.log` and blob files `0600`) at every startup even when the directory already exists, so a pre-created or mounted path is not trusted as-is. An unwritable path is a fatal startup error. Holds client PII and the exact documents mailed, so it lives outside `public/` and is never web-served. Back it up and protect it. See "Records and retention". |
 | `PD_SECURE_COOKIES`  | No       | (auto)     | `1`/`0` to force the cookie `Secure` flag on/off. Default auto-detects HTTPS via `X-Forwarded-Proto`. |
 | `PD_TRUST_PROXY`     | No       | `0`        | `1`/`true` to derive the client IP for login rate-limiting from the leftmost `X-Forwarded-For` entry. **Enable ONLY behind a trusted reverse proxy** (Railway/Render/nginx); otherwise clients can spoof `X-Forwarded-For` to evade the per-IP limit. |
 | `NODE_ENV`           | No       | (none)         | No effect on the credential checks: they apply under every value, including unset. (Earlier versions only enforced them when this was exactly `production`.) |
@@ -158,7 +158,9 @@ after Lob's own 90-day retention window closes. **`PD_DATA_DIR` is the system of
 record.**
 
 **What is stored, and where.** Under `PD_DATA_DIR` (default `<app>/data`,
-created mode `0700`):
+created mode `0700` and re-tightened to `0700` at every startup, with `audit.log`
+and blob files written `0600`, so a pre-existing or mounted directory is
+enforced rather than trusted):
 
 - `audit.log` is an append-only JSONL log. Each line is one self-contained
   event with a UTC timestamp: `letter.create` (with the HTTP status, letter ID,

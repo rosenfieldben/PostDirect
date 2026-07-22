@@ -32,6 +32,24 @@ test('sha256Hex matches node crypto', () => {
   assert.strictEqual(store.sha256Hex(buf), crypto.createHash('sha256').update(buf).digest('hex'));
 });
 
+test('data-dir permissions are enforced to 0700/0600 even when the dir pre-exists 0755', () => {
+  // The Docker image (and a bind mount or restored backup) can hand us a data
+  // directory that already exists with a looser mode, where mkdir's mode is a
+  // no-op. ensureDataDir must tighten it, and the writers must create their files
+  // 0600. (CI is Linux; these mode bits are meaningful here.)
+  const dir = tmpDir();
+  fs.chmodSync(dir, 0o755);
+  const r = store.ensureDataDir(dir);
+  assert.strictEqual(r.ok, true, 'ensureDataDir reports the dir usable');
+  store.auditAppend(dir, { type: 'test.perm' }, 1_000_000_000_000);
+  const blobHex = store.blobStore(dir, Buffer.from('rendered pdf bytes'));
+  const mode = (p) => fs.statSync(p).mode & 0o777;
+  assert.strictEqual(mode(dir), 0o700, 'data dir tightened to 0700');
+  assert.strictEqual(mode(path.join(dir, 'blobs')), 0o700, 'blobs dir 0700');
+  assert.strictEqual(mode(path.join(dir, 'audit.log')), 0o600, 'audit.log created 0600');
+  assert.strictEqual(mode(path.join(dir, 'blobs', blobHex)), 0o600, 'blob file created 0600');
+});
+
 test('normalizeAddressForHash is case/whitespace stable and ZIP-prefix stable', () => {
   const a = { line1: '185 Berry St', line2: 'Ste 6100', city: 'San Francisco', state: 'CA', zip: '94107' };
   const b = { line1: '185  BERRY   ST', line2: 'ste 6100', city: 'san francisco', state: 'ca', zip: '94107-1234' };
