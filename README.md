@@ -242,6 +242,27 @@ the basis for each attachment (which recipient hash matched, the environment
 agreement, and how long before the send), so the correlation is auditable rather
 than implicit; an unrelated verification of the same address is not attached.
 
+### What the proof package is, and is not
+
+**What it is.** A self-contained, tamper-evident record of what this app
+submitted to Lob for one letter and what Lob returned. It bundles the exact
+request bytes, Lob's creation response, the rendered PDF as printed, the tracking
+state at export time, the correlated address verifications with the basis for
+each, and every audit line for the letter, plus a `manifest.json` carrying a
+SHA-256 of every file and the audit-log chain result. Because the audit log is
+hash-chained and each package records the chain head, a later change to the
+underlying record is detectable.
+
+**What it is not.** "Tamper-evident" describes the hash chain, not a legal
+status: the package is not a court certification, a notarization, or an
+attestation of any kind. It does not prove delivery. USPS does not confirm final
+delivery for ordinary First-Class mail, so the package shows what was submitted
+and rendered for mailing, not that it arrived. It does not prove the physical
+piece was mailed; it proves what Lob was asked to mail and what Lob reported back.
+And tamper-evidence means a later change is detectable (if you anchored the chain
+head externally), not that the record is physically immutable or beyond the reach
+of someone with direct disk access.
+
 **Retention is your decision.** The app never auto-deletes anything. Removing
 records is a deliberate operator action on `PD_DATA_DIR`, outside the app.
 
