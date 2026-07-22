@@ -233,6 +233,15 @@ delivery events and **always within Lob's 90-day window**; after that Lob can no
 longer supply the rendered PDF or tracking, and the manifest will record them as
 missing (the rest of the package is still built from the durable store).
 
+An address verification is attached to a letter as evidence only when it is a
+genuine match: the verified address hashes to the letter's recipient, the same
+key environment (`test`/`live`) was used for both (a legacy record with no
+recorded environment is tolerated, not rejected), and the verification happened
+within the 24 hours before the send. The manifest's `verifications` array states
+the basis for each attachment (which recipient hash matched, the environment
+agreement, and how long before the send), so the correlation is auditable rather
+than implicit; an unrelated verification of the same address is not attached.
+
 **Retention is your decision.** The app never auto-deletes anything. Removing
 records is a deliberate operator action on `PD_DATA_DIR`, outside the app.
 

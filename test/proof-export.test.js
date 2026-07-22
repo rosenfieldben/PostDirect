@@ -88,18 +88,24 @@ function seedLetter(dir, id, opts) {
     id, object: 'letter', mail_type: 'usps_first_class', color: false, double_sided: true,
     to: { name: 'John Doe', address_line1: '456 Oak Ave', address_line2: '', address_city: 'Chicago', address_state: 'IL', address_zip: '60601' },
   };
-  store.auditAppend(dir, {
-    type: 'letter.create', status: 200, letterId: id, requestBlobSha256: blobHash,
-    requestBytes: reqBytes.length, idempotencyKey: 'idem-' + id, fingerprint: 'f'.repeat(64),
-    keyEnv: 'live', response,
-  });
-  // A correlated verification for the same recipient.
+  const env = opts.env || 'live';
+  const createTs = opts.createTs != null ? opts.createTs : Date.parse('2026-07-18T15:00:00Z');
+  // The address is verified BEFORE the send, as it is in the app (Review step),
+  // and within the 24h correlation window. Default: one hour before.
+  const verifyTs = opts.verifyTs != null ? opts.verifyTs : (createTs - 60 * 60 * 1000);
+  const verifyEnv = opts.verifyEnv || env;
+  // Append the verification first (earlier), then the send, matching real order.
   store.auditAppend(dir, {
     type: 'address.verify', status: 200,
     addressSha256: store.addressHash({ line1: '456 Oak Ave', line2: '', city: 'Chicago', state: 'IL', zip: '60601' }),
-    keyEnv: 'live', response: { deliverability: 'deliverable' },
-  });
-  return { reqBytes, blobHash, response };
+    keyEnv: verifyEnv, env: verifyEnv, response: { deliverability: 'deliverable' },
+  }, verifyTs);
+  store.auditAppend(dir, {
+    type: 'letter.create', status: 200, letterId: id, requestBlobSha256: blobHash,
+    requestBytes: reqBytes.length, idempotencyKey: 'idem-' + id, fingerprint: 'f'.repeat(64),
+    keyEnv: env, env, response,
+  }, createTs);
+  return { reqBytes, blobHash, response, createTs, verifyTs };
 }
 
 test('buildProofPackage: seeded letter yields a valid ZIP with all seven entries and matching manifest hashes', async () => {
@@ -164,6 +170,15 @@ test('buildProofPackage: seeded letter yields a valid ZIP with all seven entries
   const verifs = JSON.parse(entries['verifications.json'].toString('utf8'));
   assert.strictEqual(verifs.length, 1);
   assert.strictEqual(verifs[0].type, 'address.verify');
+  // Item 5: the manifest states the BASIS for the attachment. The seed verifies
+  // the typed recipient in the same env, one hour before the send.
+  assert.strictEqual(manifest.env, 'live', 'the send env is recorded for correlation');
+  assert.strictEqual(manifest.verifications.length, 1);
+  const vb = manifest.verifications[0];
+  assert.strictEqual(vb.hashBasis, 'response-recipient', 'the seed has no recipientSha256, so it matched via the response `to`');
+  assert.strictEqual(vb.env, 'live');
+  assert.strictEqual(vb.envBasis, 'env-match', 'both sides were live');
+  assert.strictEqual(vb.secondsBeforeCreate, 3600, 'verified one hour before the send');
 
   // The export itself is an audit event.
   const exportEvents = store.auditReadLines(dir).filter((l) => l.type === 'proof.export');
@@ -173,6 +188,42 @@ test('buildProofPackage: seeded letter yields a valid ZIP with all seven entries
   assert.strictEqual(exportEvents[0].auditCorruptLines, 0, 'the export event records the corrupt-line count');
   assert.strictEqual(exportEvents[0].pdfSha256, store.sha256Hex(pdfBytes), 'the export event links the archived render');
   assert.deepStrictEqual(exportEvents[0].fetched.sort(), ['rendered.pdf', 'tracking.json']);
+});
+
+test('buildProofPackage: correlation attaches a verification only on matching env within the 24h before the send', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pd-proof-corr-'));
+  const createTs = Date.parse('2026-07-18T12:00:00Z');
+  const addr = { line1: '456 Oak Ave', line2: '', city: 'Chicago', state: 'IL', zip: '60601' };
+  const addrHash = store.addressHash(addr);
+  const response = { id: 'ltr_corr', to: { address_line1: '456 Oak Ave', address_line2: '', address_city: 'Chicago', address_state: 'IL', address_zip: '60601' } };
+  store.blobStore(dir, Buffer.from('x'));
+  store.auditAppend(dir, { type: 'letter.create', status: 200, letterId: 'ltr_corr', requestBlobSha256: store.sha256Hex(Buffer.from('x')), recipientSha256: addrHash, keyEnv: 'live', env: 'live', response }, createTs);
+  const HR = 60 * 60 * 1000;
+  const verify = (tag, env, ts) => store.auditAppend(dir, Object.assign(
+    { type: 'address.verify', status: 200, addressSha256: addrHash, response: { deliverability: 'deliverable', tag } },
+    env == null ? {} : { keyEnv: env, env }), ts);
+  verify('A', 'live', createTs - HR);           // same env, 1h before -> ATTACHES
+  verify('B', 'test', createTs - HR);           // wrong env -> rejected
+  verify('C', 'live', createTs - 25 * HR);      // too old (>24h) -> rejected
+  verify('D', 'live', createTs + 60 * 1000);    // after the send -> rejected
+  verify('E', null, createTs - 2 * HR);         // legacy (no env), 2h before -> ATTACHES leniently
+
+  const pkg = await store.buildProofPackage(dir, 'ltr_corr', {
+    now: () => createTs,
+    fetchLetter: async () => ({ ok: false, status: 404 }),
+    fetchAsset: async () => ({ ok: false, status: 404 }),
+  });
+  const entries = readZip(pkg.zip);
+  const verifs = JSON.parse(entries['verifications.json'].toString('utf8'));
+  const tags = verifs.map((v) => v.response.tag).sort();
+  assert.deepStrictEqual(tags, ['A', 'E'], 'only the same-env (or legacy) verifications within the window attach');
+
+  const manifest = JSON.parse(entries['manifest.json'].toString('utf8'));
+  assert.strictEqual(manifest.verifications.length, 2);
+  // Both matched the typed recipient hash (recipientSha256 was recorded).
+  assert.ok(manifest.verifications.every((v) => v.hashBasis === 'typed-recipient'));
+  const byBasis = manifest.verifications.map((v) => v.envBasis).sort();
+  assert.deepStrictEqual(byBasis, ['env-match', 'legacy-envUnknown'], 'the manifest states each attachment basis');
 });
 
 test('buildProofPackage: a 404 on the rendered PDF still succeeds and records the miss', async () => {
