@@ -70,6 +70,30 @@ test('data-dir permissions are enforced to 0700/0600 even when the dir pre-exist
   assert.strictEqual(mode(path.join(dir, 'blobs', blobHex)), 0o600, 'blob file created 0600');
 });
 
+test('ensureDataDir tolerates a chmod failure (a mounted volume it does not own) instead of crashing', () => {
+  // A unit test cannot chown to another uid without root, so simulate the EPERM a
+  // volume owned by a different user would raise by stubbing fs.chmodSync. The
+  // pre-fix code let that EPERM escape and turned a writable-but-unowned mount
+  // into a fatal boot; it must now stay usable and warn instead.
+  const dir = tmpDir();
+  fs.chmodSync(dir, 0o755); // a looser, pre-existing mount we then cannot re-mode
+  const realChmod = fs.chmodSync;
+  const realErr = console.error;
+  const warnings = [];
+  console.error = (m) => { warnings.push(String(m)); };
+  fs.chmodSync = () => { const e = new Error('operation not permitted'); e.code = 'EPERM'; throw e; };
+  let r;
+  try {
+    r = store.ensureDataDir(dir);
+  } finally {
+    fs.chmodSync = realChmod;
+    console.error = realErr;
+  }
+  assert.strictEqual(r.ok, true, 'a dir it cannot chmod is still usable, not a fatal boot error');
+  assert.ok(warnings.some((w) => /could not tighten/.test(w) && /0755/.test(w)),
+    'it warns loudly that the still-loose dir could not be tightened');
+});
+
 test('normalizeAddressForHash is case/whitespace stable and ZIP-prefix stable', () => {
   const a = { line1: '185 Berry St', line2: 'Ste 6100', city: 'San Francisco', state: 'CA', zip: '94107' };
   const b = { line1: '185  BERRY   ST', line2: 'ste 6100', city: 'san francisco', state: 'ca', zip: '94107-1234' };
