@@ -412,6 +412,30 @@ test('unresolvedIntents: an outcome OR a manual resolution clears an intent', ()
   assert.deepStrictEqual(ids, [dangling], 'only the intent with neither an outcome nor a resolution remains');
 });
 
+test('ledgerRows derives newest-first action rows and excludes noise', () => {
+  const lines = [
+    { ts: 't1', type: 'send.intent', intentId: 'i1' },                          // excluded (represented by outcome/banner)
+    { ts: 't2', type: 'letter.create', letterId: 'ltr_a', status: 200, keyEnv: 'live', intentId: 'i1' },
+    { ts: 't3', type: 'address.verify', addressSha256: 'x' },                    // excluded (correlated per-letter, not an action)
+    { ts: 't4', type: 'proof.export', letterId: 'ltr_a', complete: false },
+    { ts: 't5', type: 'letter.cancel', letterId: 'ltr_a', status: 200, keyEnv: 'live' },
+    { ts: 't6', type: 'send.intent.resolved', intentId: 'i9', resolution: 'not_sent', letterId: null },
+  ];
+  const rows = store.ledgerRows(lines);
+  assert.deepStrictEqual(rows.map((r) => r.type),
+    ['send.intent.resolved', 'letter.cancel', 'proof.export', 'letter.create'],
+    'newest first, only the four action types');
+  const create = rows.find((r) => r.type === 'letter.create');
+  assert.strictEqual(create.letterId, 'ltr_a');
+  assert.strictEqual(create.status, 200);
+  assert.strictEqual(create.keyEnv, 'live');
+  const exp = rows.find((r) => r.type === 'proof.export');
+  assert.strictEqual(exp.complete, false, 'export completeness is surfaced');
+  const res = rows.find((r) => r.type === 'send.intent.resolved');
+  assert.strictEqual(res.resolution, 'not_sent');
+  assert.deepStrictEqual(store.ledgerRows([]), [], 'no lines, no rows');
+});
+
 test('appendIntentResolution validates input and refuses unknown intents', () => {
   const dir = tmpDir();
   const intentId = store.writeSendIntent(dir, { lobPath: '/v1/letters', reqHeaders: {}, reqBuf: Buffer.from('body') }, 1000);

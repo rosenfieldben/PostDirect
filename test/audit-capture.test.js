@@ -198,6 +198,30 @@ test('a plain GET listing through the proxy is NOT captured', async () => {
   assert.strictEqual(readLog().length, before, 'reads are not audit events');
 });
 
+test('GET /api/ledger returns local rows and the unresolved-intents worklist', async () => {
+  const store = require('../server.js');
+  // Unauthenticated: bounced to login.
+  const noauth = await request({ path: '/api/ledger', method: 'GET' });
+  assert.strictEqual(noauth.status, 302);
+  assert.strictEqual(noauth.headers.location, '/login');
+
+  const cookie = await login();
+  // Seed a dangling intent so the worklist is non-empty.
+  const dangling = store.writeSendIntent(DATA_DIR, { lobPath: '/v1/letters', reqHeaders: {}, reqBuf: Buffer.from('ledger-dangling') }, Date.now());
+
+  const r = await request({ path: '/api/ledger', method: 'GET', headers: { Cookie: cookie } });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.headers['cache-control'], 'no-store', 'the local record carries PII: never cached');
+  const data = JSON.parse(r.body);
+  assert.ok(Array.isArray(data.rows), 'rows is an array');
+  assert.ok(Array.isArray(data.unresolvedIntents), 'unresolvedIntents is a separate array');
+  // The earlier successful create in this file shows up as a ledger row.
+  assert.ok(data.rows.some((row) => row.type === 'letter.create' && row.letterId === 'ltr_stub123'),
+    'a recorded send is a ledger row');
+  // The seeded dangling intent is on the worklist.
+  assert.ok(data.unresolvedIntents.some((i) => i.intentId === dangling), 'the dangling intent is unresolved');
+});
+
 test('POST /api/intents/:id/resolve requires auth, validates, and records the resolution', async () => {
   const store = require('../server.js');
   // Seed a DANGLING intent (no outcome), the exact state the endpoint exists to

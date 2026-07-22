@@ -43,7 +43,7 @@ const {
   ensureDataDir, auditAppend, auditVerifyChain, blobStore, blobPath, readBlob,
   auditReadLines, auditReadStats, auditQuery, findSendsByFingerprint,
   proxyAuditType, classifyProxyKeyEnv, captureProxyEvent,
-  writeSendIntent, unresolvedIntents, appendIntentResolution,
+  writeSendIntent, unresolvedIntents, appendIntentResolution, ledgerRows,
 } = require('./lib/store');
 
 const {
@@ -471,6 +471,16 @@ async function route(req, res) {
     return res.end(pkg.zip);
   }
 
+  // ── Local durable record (authenticated) ──
+  // The server's own system of record, independent of Lob: the ledger rows
+  // (sends, cancels, exports, reconciliations) plus the reconciliation worklist
+  // (intents with no recorded outcome). Read straight from the local log, so it
+  // needs no Lob key and works even when the account list cannot be loaded.
+  if (pathname === '/api/ledger' && req.method === 'GET') {
+    const lines = auditReadLines(DATA_DIR);
+    return sendJSON(res, 200, { rows: ledgerRows(lines), unresolvedIntents: unresolvedIntents(DATA_DIR) });
+  }
+
   // ── Manually resolve a write-ahead intent (authenticated) ──
   // The reconciliation action for an intent whose send outcome was never
   // recorded (a crash or lost response between the intent and Lob's reply). The
@@ -686,6 +696,7 @@ module.exports = {
   writeSendIntent,
   unresolvedIntents,
   appendIntentResolution,
+  ledgerRows,
   // Proof export
   crc32,
   zipStore,

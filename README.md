@@ -207,7 +207,11 @@ the intent and Lob's reply) is a send whose fate is unknown: it stays on a
 reconciliation worklist until you check Lob and record what happened via
 `POST /api/intents/:intentId/resolve` (`accepted`, `not_sent`, or `unknown`),
 which appends a `send.intent.resolved` line. Reconciliation is always a manual
-operator judgment; the app never auto-resends anything.
+operator judgment; the app never auto-resends anything. The **Local record**
+section of the History tab shows this durable ledger and, when there is anything
+to reconcile, a banner with an inline control to record each outcome. It reads
+the server's own log (`GET /api/ledger`), so it needs no Lob key and works even
+when the account list cannot be loaded.
 
 **It contains client PII and the documents you mailed.** Treat the directory as
 sensitive: restrict its permissions (it is `0700`), keep it off any web-served
