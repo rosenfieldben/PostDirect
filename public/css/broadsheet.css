@@ -1,10 +1,14 @@
-/* Broadsheet design system, vendored verbatim from the redesign handoff
+/* Broadsheet design system, vendored from the redesign handoff
    (design_handoff_postdirect_redesign/_ds/broadsheet-.../styles.css).
    This file is the token + component source of truth; page-specific
-   layout lives in app.css, layered on these classes. One local change:
-   the @import font line is removed, because the pages load Source Serif 4
-   themselves via <link> with the handoff's exact family string (optical
-   size axis + full 400..700 weight range, which the @import lacked). */
+   layout lives in app.css, layered on these classes. Two local changes
+   from the vendored original:
+   (1) the @import font line is removed, because the pages load Source
+   Serif 4 themselves via <link> with the handoff's exact family string
+   (optical size axis + full 400..700 weight range, which the @import
+   lacked); and (2) the demo-only CMYK image-separation block (.cmyk and
+   .sep-* rules referencing SVG plate filters absent from this app's DOM)
+   is removed. */
 
 :root {
   --color-bg: #f3f2f2;
@@ -47,7 +51,7 @@
   --color-accent-2-900: #4b1528;
 
   /* The third process ink — review round 3: the deck's print treatments
-     (the CMYK separation and the misregistered plate numerals below) need
+     (the misregistered plate numerals below) need
      the full four-color set. Cyan and magenta are the system's own accents;
      this yellow completes them, muted to the same press-ink register. A
      print treatment color, not an interface accent — body copy and chrome
@@ -87,59 +91,6 @@ h1, h2, h3, h4 { font-family: var(--font-heading); font-weight: var(--font-headi
 .halftone::after{content:"";position:absolute;inset:0;pointer-events:none;
   background-image:radial-gradient(circle,rgba(0,0,0,0.22) 30%,transparent 32%);
   background-size:3px 3px;mix-blend-mode:multiply}
-
-/* The four-color separation treatment (review round 3) — a photograph
-   printed as its misregistered process plates, after the Catalogue Three
-   grammar. Markup: a figure.cmyk holding five copies of the image — the
-   first is the layout sizer (hidden), then one per plate, each tagged
-   .sep-c/.sep-m/.sep-y/.sep-k. The plates are extracted live by the SVG
-   feColorMatrix filters in print-plates.js, the system's own defs —
-   inlined in the compiled bundle every template page loads, and a
-   page that links styles.css directly adds
-   <script src="print-plates.js"></script> itself (the defs must be in
-   the document: a data-URI filter reference would not survive Chromium,
-   and external-file references are unreliable across engines) — nudged
-   a few pixels out of register, and multiplied
-   onto the paper ground; the halftone dot screens the recombined print.
-   The plate offsets live with the deck's projection-scale CSS, since
-   misregistration is sized to the output. */
-.cmyk{position:relative;overflow:hidden;background:var(--color-bg)}
-.cmyk img:first-child{opacity:0} /* layout sizer AND the alt-bearing image — opacity
-  keeps it in the accessibility tree (visibility:hidden would drop the figure's only
-  description); fully transparent, it adds nothing to the multiply backdrop */
-.cmyk img+img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;mix-blend-mode:multiply}
-.cmyk .sep-c{filter:url(#sep-c)}
-.cmyk .sep-m{filter:url(#sep-m)}
-.cmyk .sep-y{filter:url(#sep-y)}
-.cmyk .sep-k{filter:url(#sep-k)}
-.cmyk::after{content:"";position:absolute;inset:0;pointer-events:none;
-  background-image:radial-gradient(circle,rgba(0,0,0,0.22) 30%,transparent 32%);
-  background-size:3px 3px;mix-blend-mode:multiply}
-
-/* The one-image separation (review round 9, promoted from the deck in the
-   landing divergence) — the same four plates as ONE compound filter,
-   #sep-all in print-plates.js, for a single swappable image: a .print
-   wrapper inside the figure holds one <image-slot>, and the filter
-   extracts, offsets and multiplies the plates live from whatever the slot
-   shows. Markup: figure.cmyk > .print > image-slot (the page sizes the
-   .print — aspect-ratio, or absolute fill for bleeds). Hover resolves
-   the print into the photograph — the pressman checking registration on
-   the light table — so the source shows crisp and any swap chrome stays
-   legible; only the reduced-motion fallback below still lifts as a
-   single cut (a url() filter cannot CSS-transition; the press driver
-   animates the defs instead). */
-.cmyk .print{position:relative;width:100%;filter:url(#sep-all)}
-/* no hover end-state swap: the press driver (print-plates.js) eases the
-   plates into register while purifying their inks to the pure-process
-   separation on the same curve, so the converged four-plate merge IS
-   the photograph (their multiply equals SourceGraphic by construction)
-   — no cut anywhere on the animated path */
-@media (prefers-reduced-motion: reduce), (hover: none), (pointer: coarse) {
-  .cmyk .print:hover{filter:none} /* without the driver (it stands down on
-    exactly these conditions), hover stays the old single cut to the
-    crisp source */
-}
-.cmyk .print image-slot{width:100%;height:100%;display:block}
 
 /* The plate numeral (review rounds 3-4) — display figures set as
    misregistered process plates, the catalog's cover grammar. Review
