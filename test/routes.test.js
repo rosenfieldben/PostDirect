@@ -178,6 +178,22 @@ test('HSTS is sent when the connection is secure and absent otherwise', async ()
     'no HSTS over plain HTTP');
 });
 
+test('self-hosted fonts: authenticated GET serves woff2; anonymous is gated to /login', async () => {
+  const file = '/fonts/source-serif-4-roman-latin.woff2';
+  // No pre-auth carve-out for /fonts: an anonymous request bounces off the auth
+  // gate to /login, exactly like any other static asset. This pins the decision
+  // that the font sits behind auth (the login page uses the Georgia fallback).
+  const anon = await request({ path: file, method: 'GET' });
+  assert.strictEqual(anon.status, 302);
+  assert.strictEqual(anon.headers.location, '/login');
+  // Authenticated, the file serves with the woff2 MIME type (not octet-stream).
+  const login = await request({ path: '/login', method: 'POST', headers: FORM }, loginBody('itest-user', 'itest-pass'));
+  const cookie = String(login.headers['set-cookie']).split(';')[0];
+  const r = await request({ path: file, method: 'GET', headers: { Cookie: cookie } });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.headers['content-type'], 'font/woff2');
+});
+
 test('traversal guard: nothing outside public/ is served', async () => {
   // Authenticate first so the request reaches serveStatic instead of bouncing
   // off the auth gate; the guard under test is the path check, not the login.

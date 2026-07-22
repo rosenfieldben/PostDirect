@@ -127,7 +127,7 @@ verdict/correction logic.
 - `PD_SECRET` must be stable across restarts: sessions are HMAC-signed with it, so a changed secret logs everyone out on restart
 - Sessions are stateless signed cookies and expire after 7 days; logout clears the cookie (there is no server-side revocation)
 - Login uses constant-time credential comparison plus rate limiting (5 failed attempts / 15 min) across **two** parallel buckets, per client IP **and** per username, so brute-force and random-username spray are both blunted, even when clients share a source IP behind a proxy (see `PD_TRUST_PROXY`). Credentials are checked **before** either bucket, so the buckets only throttle **failed** attempts and a correct password always logs in — even from an IP whose bucket is full. This matters behind a reverse proxy with `PD_TRUST_PROXY` off, where every client collapses to the proxy's socket IP: an attacker's failures can never lock the real owner (or anyone else with the right password) out. Bucket keys are capped at 256 characters and each bucket at 10,000 entries, bounding attacker-controlled memory between cleanup sweeps; IPv6 sources are keyed by /64 prefix so a single allocation can't mint unlimited buckets
-- Every response carries hardening headers: a `Content-Security-Policy` (scripts/styles/connections locked to same-origin + Google Fonts, framing disabled), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer`; HTTPS responses additionally carry `Strict-Transport-Security` (180 days)
+- Every response carries hardening headers: a `Content-Security-Policy` (scripts, styles, fonts, images, and connections all locked to same-origin, so no third-party origins remain now that the app's typeface is self-hosted; framing disabled), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer`; HTTPS responses additionally carry `Strict-Transport-Security` (180 days)
 - Frontend output is HTML-escaped including quotes (safe in attribute contexts), and the multipart builder sanitizes header fields (filename, field names) against CRLF/quote injection
 - Request bodies are size-capped (16 KB for login, 52 MB for the Lob proxy) to prevent memory-exhaustion
 - Every send carries a Lob idempotency key keyed to a content fingerprint (normalized recipient + shared options + uploaded-file hash) and persisted in `localStorage`, so an identical resubmit reuses the same key and Lob de-duplicates it within its 24-hour window, **even across a page reload or crash** (the old in-memory key was lost on reload, which could double-mail). After 24 hours the local key is pruned and a resubmit is a genuinely new letter; the durable server record then surfaces a **duplicate-send warning** naming the prior send. The warning informs, it does not block: the operator may legitimately resend. A send in flight also arms a page-unload warning
@@ -190,7 +190,8 @@ PostDirect/
 │   └── workflows/
 │       └── ci.yml    # GitHub Actions: npm test on Node 18/20/22
 ├── public/
-│   └── index.html    # The PostDirect app
+│   ├── index.html    # The PostDirect app
+│   └── fonts/        # Self-hosted Source Serif 4 (woff2 + OFL license)
 ├── test/             # node:test unit tests (no deps) — run with `npm test`
 └── README.md
 ```
