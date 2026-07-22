@@ -1,13 +1,9 @@
-# node:24-alpine (Node 24 LTS is the deployment target). Pulled by TAG, NOT by
-# an @sha256 digest: Railway's builder cannot resolve a digest-pinned multi-arch
-# base and aborts image resolution in ~3s with no output. The same Dockerfile
-# builds cleanly in GitHub Actions and the digest is valid/current on Docker Hub,
-# so this is a Railway builder constraint, not a bad digest. Re-pinning by digest
-# WILL break the Railway deploy — keep this a tag unless/until Railway fixes
-# digest-by-pin pulls. Floating the official tag also picks up base security
-# patches, which suits this security-sensitive, zero-runtime-dependency app.
-# For the record, on 2026-07-19 this tag resolved to the multi-arch index:
-#   sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
+# node:24-alpine (Node 24 LTS is the deployment target). Pulled by tag for now.
+# (An earlier @sha256 digest pin was removed on the theory that it broke Railway
+# builds; that theory was wrong — the digest is valid and builds fine everywhere,
+# and the real Railway breaker was the VOLUME instruction, see below. The pin can
+# be restored once a Railway deploy is verified green; on 2026-07-19 this tag
+# resolved to sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd.)
 FROM node:24-alpine
 WORKDIR /app
 # Copy with node ownership so the unprivileged runtime user can read the files.
@@ -24,8 +20,15 @@ COPY --chown=node:node public/ ./public/
 # so a named volume mounted here inherits node ownership on first initialization.
 # Mount a volume at /app/data to persist records across container replacement
 # (see the README "Records and retention" section).
+#
+# Deliberately NO `VOLUME /app/data` instruction here: Railway's builder does not
+# support the VOLUME instruction and fails the whole build opaquely (~3s into
+# BUILD_IMAGE with zero output — every deploy from the commit that introduced it
+# until the commit that removed it failed this way). VOLUME only declared an
+# anonymous-volume mount point; explicit mounts (`docker run -v pd-data:/app/data`,
+# compose volumes, Railway's own volume feature) work identically without it, and
+# the mkdir/chown above is what actually provides the writable, node-owned dir.
 RUN mkdir -p /app/data && chown node:node /app/data
-VOLUME /app/data
 EXPOSE 3491
 ENV PORT=3491
 ENV NODE_ENV=production
