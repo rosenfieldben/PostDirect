@@ -38,6 +38,13 @@ test('send flow: honest labels, proof export, and the duplicate warning', async 
   const manifest = JSON.parse(entries['manifest.json'].toString('utf8'));
   expect(manifest.hasLocalRecord).toBe(true);
 
+  // The operator's pasted key must reach Lob on export: the server fetches the
+  // letter under the client key, so the stub must have seen the browser's Basic
+  // auth on that fetch. This fails on main (export sent no headers, so the stub
+  // saw null) and passes once exportProof attaches authHeaders().
+  const expectedAuth = 'Basic ' + Buffer.from('test_browserkey:').toString('base64');
+  expect(app.proofLetterAuth()).toBe(expectedAuth);
+
   // ── Duplicate warning (in-session, no reload) ──
   // Return to the compose view and use "Send another letter" (#btn-reset), which
   // increments the ephemeral recipient id. Re-entering the identical letter then

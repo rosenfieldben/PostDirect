@@ -1110,7 +1110,11 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     const original = btn ? btn.textContent : null;
     if (btn) { btn.disabled = true; btn.textContent = 'Exporting…'; }
     try {
-      const resp = await fetch('/api/proof/' + encodeURIComponent(id), { method: 'GET' });
+      // Attach the operator's pasted key (authHeaders is {} in server-key mode, so
+      // that path is unchanged). Without it, the server's proof handler fell back
+      // to the server key, so pasted-key mode exported under the wrong key or not
+      // at all; every other Lob call in this module already sends authHeaders().
+      const resp = await fetch('/api/proof/' + encodeURIComponent(id), { method: 'GET', headers: authHeaders() });
       if (!resp.ok) {
         let msg = 'Export failed (HTTP ' + resp.status + ')';
         try { const j = await resp.json(); if (j && j.error && j.error.message) msg = j.error.message; } catch (e) { /* not json */ }
