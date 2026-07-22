@@ -50,10 +50,13 @@ test('Cache-Control: no-store on pages/API, private caching only for non-HTML st
     assert.strictEqual(home.status, 200);
     assert.strictEqual(home.headers['cache-control'], 'no-store');
     assert.strictEqual((await get('/api/config', authed)).headers['cache-control'], 'no-store');
-    // Non-HTML static assets get the private caching override.
+    // Code coupled to the HTML shell (css, js, mjs) stays no-store, so a deploy
+    // never leaves a browser on fresh HTML with a stale cached module/stylesheet.
     const css = await get('/css/app.css', authed);
     assert.strictEqual(css.status, 200);
-    assert.strictEqual(css.headers['cache-control'], 'private, max-age=3600');
+    assert.strictEqual(css.headers['cache-control'], 'no-store', 'css is code: no-store');
+    assert.strictEqual((await get('/js/app.mjs', authed)).headers['cache-control'], 'no-store', 'js module is code: no-store');
+    // Standalone content assets (fonts) keep the private cache: not markup-coupled.
     assert.strictEqual((await get('/fonts/source-serif-4-roman-latin.woff2', authed)).headers['cache-control'], 'private, max-age=3600');
   } finally {
     await new Promise((r) => server.close(r));

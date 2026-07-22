@@ -142,6 +142,14 @@ function setSecurityHeaders(res) {
 // ══════════════════════════════════════════════════════════════
 const STATIC_DIR = path.join(__dirname, 'public');
 const MIME_TYPES = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.mjs': 'application/javascript', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
+// Served no-store (the setSecurityHeaders default): the HTML shell and the code
+// coupled to it. These load from fixed, unversioned URLs, so if they were cached,
+// a deploy that changed both index.html and a module or stylesheet could leave a
+// returning browser running the fresh (no-store) markup against a stale cached
+// script, breaking the app until the cache expired. Fonts and images are NOT in
+// this set: they are standalone, so a stale one is at most cosmetic, and caching
+// them privately is the point (it spares re-downloading the ~310 KB of woff2).
+const NO_STORE_STATIC_EXTS = new Set(['.html', '.css', '.js', '.mjs']);
 
 function serveStatic(res, filePath) {
   const full = path.join(STATIC_DIR, filePath);
@@ -150,12 +158,10 @@ function serveStatic(res, filePath) {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
     const ext = path.extname(full);
     const headers = { 'Content-Type': MIME_TYPES[ext] || 'application/octet-stream' };
-    // Non-HTML static assets (css, js, mjs, fonts, images) sit behind the auth
-    // gate and carry no PII, so a private (per-user, not shared) cache is fine and
-    // spares re-downloading the ~310 KB of self-hosted woff2 on every page view.
-    // index.html stays no-store (the default from setSecurityHeaders): it is the
-    // app shell, and this writeHead merges over the setHeader'd Cache-Control.
-    if (ext !== '.html') headers['Cache-Control'] = 'private, max-age=3600';
+    // Content assets (fonts, images) are cached privately; code (css/js/mjs) and
+    // the HTML shell keep the no-store default so a deploy never serves stale,
+    // markup-coupled code. This writeHead merges over the setHeader'd Cache-Control.
+    if (!NO_STORE_STATIC_EXTS.has(ext)) headers['Cache-Control'] = 'private, max-age=3600';
     res.writeHead(200, headers);
     res.end(data);
   });
