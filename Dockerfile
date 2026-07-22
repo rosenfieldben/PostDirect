@@ -1,10 +1,11 @@
-# node:24-alpine (Node 24 LTS is the deployment target). Pulled by tag for now.
-# (An earlier @sha256 digest pin was removed on the theory that it broke Railway
-# builds; that theory was wrong — the digest is valid and builds fine everywhere,
-# and the real Railway breaker was the VOLUME instruction, see below. The pin can
-# be restored once a Railway deploy is verified green; on 2026-07-19 this tag
-# resolved to sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd.)
-FROM node:24-alpine
+# node:24-alpine (Node 24 LTS is the deployment target), pinned by digest so the
+# base cannot float on a mutable tag. Refresh the digest deliberately when
+# bumping Node. Resolve a new one with:
+#   docker manifest inspect node:24-alpine
+# (History: this pin was briefly removed on the theory that it broke Railway
+# builds. It didn't — the breaker was a VOLUME instruction, since removed, and
+# Railway's green 2026-07-22 build pulled this exact digest. Safe to keep pinned.)
+FROM node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
 WORKDIR /app
 # Copy with node ownership so the unprivileged runtime user can read the files.
 # server.js is the composition root; lib/ holds the modules it requires; public/
