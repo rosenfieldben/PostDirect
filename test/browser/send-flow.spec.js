@@ -38,18 +38,19 @@ test('send flow: honest labels, proof export, and the duplicate warning', async 
   const manifest = JSON.parse(entries['manifest.json'].toString('utf8'));
   expect(manifest.hasLocalRecord).toBe(true);
 
-  // ── Duplicate warning ──
-  // A page RELOAD resets the ephemeral recipient counter, so re-entering the
-  // identical letter reproduces the exact fingerprint of the first send (the
-  // fingerprint intentionally includes the recipient id, which is why the
-  // in-session "Send Another" is treated as a new letter instead). The durable
-  // server record then flags the prior send.
-  await page.goto(app.appUrl + '/', { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector('#api-key-input');
-  await page.fill('#api-key-input', 'test_browserkey');
+  // ── Duplicate warning (in-session, no reload) ──
+  // Return to the compose view and use "Send another letter" (#btn-reset), which
+  // increments the ephemeral recipient id. Re-entering the identical letter then
+  // fingerprint-matches the first send ONLY because the id is excluded from the
+  // fingerprint, so the durable server record raises the duplicate confirm(). The
+  // old page-reload workaround (which reset the id counter to line the
+  // fingerprints up) is gone: it masked the very defect this now exercises.
+  await page.click('#view-compose-tab');
+  await page.click('#btn-reset');
+  await page.waitForSelector('#step-0:not(.is-hidden)');
   let dialogMessage = null;
   page.on('dialog', (d) => { dialogMessage = d.message(); d.dismiss(); });
-  await composeToReview(page); // identical letter, recipient id back to 1
+  await composeToReview(page); // identical letter; the recipient id has advanced
   await page.click('#btn-next'); // Send -> duplicate check -> confirm() dialog
   await expect.poll(() => dialogMessage, { timeout: 10_000 }).toContain('Possible duplicate send');
   // Dialog dismissed, so no second letter was sent: still on the review step.

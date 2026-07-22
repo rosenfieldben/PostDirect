@@ -16,6 +16,17 @@
 
   const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // Lob honors an idempotency key for 24 hours
 
+  // The recipient is fingerprinted over an explicit allowlist of CONTENT fields
+  // only. The ephemeral DOM recipient id (readRecipientFromDOM attaches it), and
+  // any other incidental key that may ride along in future, must never reach the
+  // canonical string. The id once did: because "Send another letter" increments
+  // it, an identical letter got a different fingerprint, which defeated all three
+  // duplicate protections that key on the fingerprint (the /api/sends warning
+  // query, the localStorage mint of the Lob Idempotency-Key, and the
+  // X-PD-Fingerprint server record) and printed real duplicate mail through the
+  // in-session Send Another flow.
+  const RECIPIENT_FINGERPRINT_FIELDS = ['name', 'company', 'line1', 'line2', 'city', 'state', 'zip'];
+
   // ═══ Durable idempotency + content fingerprint ═══
   // Canonical string over the normalized recipient, the shared send options,
   // and the uploaded-file hash. Named + pure so the extraction harness can pin
@@ -29,13 +40,18 @@
       Object.keys(obj || {}).sort().forEach((k) => { out[k] = trim(obj[k]); });
       return out;
     };
+    // Reduce the recipient to the allowlisted content fields before sort+trim, so
+    // unknown keys (the DOM id, and anything future) cannot influence the digest.
+    const r = recipient || {};
+    const recipientContent = {};
+    RECIPIENT_FINGERPRINT_FIELDS.forEach((k) => { recipientContent[k] = r[k]; });
     // options may arrive as commonLetterFields' array of [key, value] pairs or
     // as a plain object; normalize both to a sorted, trimmed object.
     let optObj = {};
     if (Array.isArray(options)) options.forEach((pair) => { optObj[pair[0]] = pair[1]; });
     else optObj = Object.assign({}, options);
     return JSON.stringify({
-      recipient: sortTrim(recipient || {}),
+      recipient: sortTrim(recipientContent),
       options: sortTrim(optObj),
       file: String(fileHashHex == null ? '' : fileHashHex),
     });
