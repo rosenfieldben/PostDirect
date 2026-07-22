@@ -190,6 +190,21 @@ commitment**: record it somewhere outside the server (a note, a timestamped
 email, a countersignature) and any later rewrite of history becomes provable,
 because the recomputed head will no longer match what you anchored.
 
+**Write-ahead intents: a send is recorded before it happens.** Before the proxy
+contacts Lob for a mutating call (creating or cancelling a letter), it appends a
+`send.intent` line (a new random `intentId`, the request hash, the recipient and
+fingerprint hashes, the idempotency key) and stores the exact request bytes as a
+blob. This write is durable and it **fails closed**: if the intent cannot be
+written, the send is refused with a `503` and Lob is never contacted, because a
+send we cannot record is a send we will not make. When Lob answers, the outcome
+(`letter.create` / `letter.cancel`) is recorded carrying the same `intentId`. An
+intent with no recorded outcome (a crash, a timeout, or a lost response between
+the intent and Lob's reply) is a send whose fate is unknown: it stays on a
+reconciliation worklist until you check Lob and record what happened via
+`POST /api/intents/:intentId/resolve` (`accepted`, `not_sent`, or `unknown`),
+which appends a `send.intent.resolved` line. Reconciliation is always a manual
+operator judgment; the app never auto-resends anything.
+
 **It contains client PII and the documents you mailed.** Treat the directory as
 sensitive: restrict its permissions (it is `0700`), keep it off any web-served
 path (it lives outside `public/` and the server never serves it), and encrypt

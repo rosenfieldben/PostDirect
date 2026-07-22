@@ -310,27 +310,35 @@ test('classifyProxyKeyEnv derives test/live from Basic auth and never returns th
   assert.strictEqual(store.classifyProxyKeyEnv('Bearer whatever'), null, 'non-Basic yields no classification');
 });
 
-test('captureProxyEvent records a letter.create with a blob and no Authorization material', () => {
+test('captureProxyEvent records a letter.create linked to its intent, with a blob and no Authorization material', () => {
   const dir = tmpDir();
   const reqBuf = Buffer.from('--boundary multipart bytes--');
   const resp = Buffer.from(JSON.stringify({ id: 'ltr_capture1', object: 'letter' }));
   const reqHeaders = { 'idempotency-key': 'idem-123', 'x-pd-fingerprint': 'f'.repeat(64), 'x-pd-recipient-hash': 'a'.repeat(64) };
   const upstreamAuth = 'Basic ' + Buffer.from('live_secretkey:').toString('base64');
-  store.captureProxyEvent(dir, 'letter.create', '/v1/letters', reqHeaders, upstreamAuth, reqBuf, 200, resp);
+  // The real flow writes the intent (which stores the request-body blob) BEFORE
+  // Lob is contacted; the outcome capture then references that blob and links
+  // back to the intent by id. Mirror that order here.
+  const intentId = store.writeSendIntent(dir, { lobPath: '/v1/letters', reqHeaders, reqBuf }, 1000);
+  store.captureProxyEvent(dir, 'letter.create', '/v1/letters', reqHeaders, upstreamAuth, reqBuf, 200, resp, intentId);
 
   const lines = store.auditReadLines(dir);
-  assert.strictEqual(lines.length, 1);
-  const ev = lines[0];
-  assert.strictEqual(ev.type, 'letter.create');
+  assert.strictEqual(lines.length, 2, 'the intent line and the outcome line');
+  const ev = lines.find((l) => l.type === 'letter.create');
   assert.strictEqual(ev.status, 200);
   assert.strictEqual(ev.letterId, 'ltr_capture1');
+  assert.strictEqual(ev.intentId, intentId, 'the outcome links back to the write-ahead intent');
   assert.strictEqual(ev.idempotencyKey, 'idem-123');
   assert.strictEqual(ev.fingerprint, 'f'.repeat(64));
   assert.strictEqual(ev.recipientSha256, 'a'.repeat(64), 'X-PD-Recipient-Hash is captured for verification correlation');
   assert.strictEqual(ev.keyEnv, 'live');
   assert.strictEqual(ev.requestBlobSha256, store.sha256Hex(reqBuf));
   assert.strictEqual(ev.requestBytes, reqBuf.length);
+  // The blob was stored at intent time (not by the capture), and still holds the
+  // exact request bytes the outcome references.
   assert.deepStrictEqual(store.readBlob(dir, ev.requestBlobSha256), reqBuf, 'blob holds the exact request bytes');
+  // The outcome resolves the intent: nothing left in the reconciliation worklist.
+  assert.deepStrictEqual(store.unresolvedIntents(dir), [], 'a recorded outcome resolves the intent');
   // Belt and suspenders: the serialized line must contain no key material.
   const serialized = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8');
   assert.ok(!serialized.includes('secretkey'), 'the Lob key must never appear in the log');
@@ -362,4 +370,68 @@ test('captureProxyEvent records cancel (letter id from path) and verify (address
   assert.strictEqual(verify.addressSha256,
     store.addressHash({ line1: '185 Berry St', line2: 'Ste 6100', city: 'San Francisco', state: 'CA', zip: '94107' }),
     'verify event address hash correlates to the same normalized recipient');
+});
+
+test('writeSendIntent stores the request blob and records a send.intent that unresolvedIntents surfaces', () => {
+  const dir = tmpDir();
+  const reqBuf = Buffer.from('the exact bytes we are about to send to Lob');
+  const headers = { 'idempotency-key': 'idem-x', 'x-pd-fingerprint': 'f'.repeat(64), 'x-pd-recipient-hash': 'r'.repeat(64) };
+  const intentId = store.writeSendIntent(dir, { lobPath: '/v1/letters', reqHeaders: headers, reqBuf }, 1000);
+  assert.match(intentId, store.INTENT_ID_RE, 'a v4 UUID intent id is returned');
+  const intent = store.auditReadLines(dir).find((l) => l.type === 'send.intent');
+  assert.strictEqual(intent.intentId, intentId);
+  assert.strictEqual(intent.lobPath, '/v1/letters');
+  assert.strictEqual(intent.idempotencyKey, 'idem-x');
+  assert.strictEqual(intent.fingerprint, 'f'.repeat(64));
+  assert.strictEqual(intent.recipientHash, 'r'.repeat(64));
+  assert.strictEqual(intent.requestSha256, store.sha256Hex(reqBuf), 'the intent commits to the request bytes');
+  assert.strictEqual(intent.requestBlob, intent.requestSha256, 'requestBlob is the content-addressed key');
+  // The blob is stored at intent time (this is the ONLY place it is written now).
+  assert.deepStrictEqual(store.readBlob(dir, intent.requestBlob), reqBuf);
+  // With no outcome yet, the intent is unresolved: it is the reconciliation list.
+  const unresolved = store.unresolvedIntents(dir);
+  assert.strictEqual(unresolved.length, 1);
+  assert.strictEqual(unresolved[0].intentId, intentId);
+  assert.strictEqual(unresolved[0].requestSha256, intent.requestSha256);
+});
+
+test('unresolvedIntents: an outcome OR a manual resolution clears an intent', () => {
+  const dir = tmpDir();
+  // Three intents. One resolved by a recorded outcome, one by a manual
+  // resolution, one left dangling.
+  const byOutcome = store.writeSendIntent(dir, { lobPath: '/v1/letters', reqHeaders: {}, reqBuf: Buffer.from('outcome-body') }, 1000);
+  const byResolution = store.writeSendIntent(dir, { lobPath: '/v1/letters', reqHeaders: {}, reqBuf: Buffer.from('resolution-body') }, 2000);
+  const dangling = store.writeSendIntent(dir, { lobPath: '/v1/letters', reqHeaders: {}, reqBuf: Buffer.from('dangling-body') }, 3000);
+  // A recorded letter.create carrying the intentId resolves the first.
+  store.auditAppend(dir, { type: 'letter.create', status: 200, letterId: 'ltr_x', intentId: byOutcome }, 4000);
+  // A manual resolution resolves the second.
+  store.appendIntentResolution(dir, byResolution, { resolution: 'not_sent', note: 'checked Lob, nothing there' }, 5000);
+  const ids = store.unresolvedIntents(dir).map((i) => i.intentId);
+  assert.deepStrictEqual(ids, [dangling], 'only the intent with neither an outcome nor a resolution remains');
+});
+
+test('appendIntentResolution validates input and refuses unknown intents', () => {
+  const dir = tmpDir();
+  const intentId = store.writeSendIntent(dir, { lobPath: '/v1/letters', reqHeaders: {}, reqBuf: Buffer.from('body') }, 1000);
+  // Bad resolution value.
+  let r = store.appendIntentResolution(dir, intentId, { resolution: 'bogus' }, 2000);
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.status, 400);
+  // Bad letterId format.
+  r = store.appendIntentResolution(dir, intentId, { resolution: 'accepted', letterId: 'not-a-letter' }, 2000);
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.status, 400);
+  // Unknown intent id (well-formed but never written).
+  r = store.appendIntentResolution(dir, '00000000-0000-4000-8000-000000000000', { resolution: 'unknown' }, 2000);
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.status, 404);
+  // Valid: appends a send.intent.resolved line and clears the worklist.
+  r = store.appendIntentResolution(dir, intentId, { resolution: 'accepted', letterId: 'ltr_real1', note: 'found it at Lob' }, 3000);
+  assert.strictEqual(r.ok, true);
+  const resolved = store.auditReadLines(dir).find((l) => l.type === 'send.intent.resolved');
+  assert.strictEqual(resolved.intentId, intentId);
+  assert.strictEqual(resolved.resolution, 'accepted');
+  assert.strictEqual(resolved.letterId, 'ltr_real1');
+  assert.strictEqual(resolved.note, 'found it at Lob');
+  assert.deepStrictEqual(store.unresolvedIntents(dir), [], 'the resolution clears the intent');
 });
