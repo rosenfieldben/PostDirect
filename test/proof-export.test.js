@@ -132,6 +132,7 @@ test('buildProofPackage: seeded letter yields a valid ZIP with all seven entries
   assert.strictEqual(manifest.complete, true, 'a full bundle is marked complete');
   assert.strictEqual(manifest.hasLocalRecord, true, 'the letter.create record is present');
   assert.strictEqual(manifest.auditCorruptLines, 0, 'a clean seeded log reports zero corrupt audit lines');
+  assert.strictEqual(manifest.pdfSha256, store.sha256Hex(pdfBytes), 'manifest links the letter to the archived render');
   for (const f of manifest.files) {
     assert.ok(entries[f.name], 'inventory names a real entry: ' + f.name);
     assert.strictEqual(store.sha256Hex(entries[f.name]), f.sha256, 'manifest hash matches ' + f.name);
@@ -150,6 +151,7 @@ test('buildProofPackage: seeded letter yields a valid ZIP with all seven entries
   assert.strictEqual(exportEvents.length, 1);
   assert.strictEqual(exportEvents[0].packageSha256, pkg.packageSha256);
   assert.strictEqual(exportEvents[0].auditCorruptLines, 0, 'the export event records the corrupt-line count');
+  assert.strictEqual(exportEvents[0].pdfSha256, store.sha256Hex(pdfBytes), 'the export event links the archived render');
   assert.deepStrictEqual(exportEvents[0].fetched.sort(), ['rendered.pdf', 'tracking.json']);
 });
 
@@ -168,6 +170,7 @@ test('buildProofPackage: a 404 on the rendered PDF still succeeds and records th
   const miss = manifest.missing.find((m) => m.name === 'rendered.pdf');
   assert.ok(miss, 'manifest records the rendered.pdf miss');
   assert.match(miss.reason, /404/, 'the reason names the status');
+  assert.strictEqual(manifest.pdfSha256, null, 'no pdfSha256 when the render could not be fetched');
   assert.strictEqual(manifest.complete, false, 'a partial bundle is marked incomplete');
   assert.strictEqual(manifest.hasLocalRecord, true, 'the local record is still present (only the live PDF is missing)');
   // Everything the manifest DOES list must still hash-match.
