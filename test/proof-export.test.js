@@ -143,6 +143,15 @@ test('buildProofPackage: seeded letter yields a valid ZIP with all seven entries
   assert.strictEqual(manifest.chain.legacyLines, 0, 'auditAppend-written lines are all chained');
   assert.strictEqual(manifest.chain.firstBreakSeq, null, 'no break in a clean chain');
   assert.match(manifest.chain.head, /^[0-9a-f]{64}$/, 'head is a sha256 hex commitment');
+
+  // Item 3: the finished bundle is persisted under exports/, named by letter id
+  // and the colon-stripped generatedAt, at 0600, and the persisted bytes ARE the
+  // bundle. The manifest and the return value both name that path.
+  assert.strictEqual(manifest.packagePath, 'exports/ltr_ok1-2026-07-18T15-00-00.000Z.zip');
+  assert.strictEqual(pkg.packagePath, manifest.packagePath, 'the return value names the same path');
+  const persisted = fs.readFileSync(path.join(dir, manifest.packagePath));
+  assert.strictEqual(store.sha256Hex(persisted), pkg.packageSha256, 'the persisted file is the exact bundle');
+  assert.strictEqual(fs.statSync(path.join(dir, manifest.packagePath)).mode & 0o777, 0o600, 'the export is persisted 0600');
   for (const f of manifest.files) {
     assert.ok(entries[f.name], 'inventory names a real entry: ' + f.name);
     assert.strictEqual(store.sha256Hex(entries[f.name]), f.sha256, 'manifest hash matches ' + f.name);
@@ -160,6 +169,7 @@ test('buildProofPackage: seeded letter yields a valid ZIP with all seven entries
   const exportEvents = store.auditReadLines(dir).filter((l) => l.type === 'proof.export');
   assert.strictEqual(exportEvents.length, 1);
   assert.strictEqual(exportEvents[0].packageSha256, pkg.packageSha256);
+  assert.strictEqual(exportEvents[0].packagePath, manifest.packagePath, 'the export event names the persisted path');
   assert.strictEqual(exportEvents[0].auditCorruptLines, 0, 'the export event records the corrupt-line count');
   assert.strictEqual(exportEvents[0].pdfSha256, store.sha256Hex(pdfBytes), 'the export event links the archived render');
   assert.deepStrictEqual(exportEvents[0].fetched.sort(), ['rendered.pdf', 'tracking.json']);

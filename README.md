@@ -173,6 +173,10 @@ rejected):
 - `blobs/` holds content-addressed raw bytes (`blobs/<sha256hex>`): the exact
   request bytes sent to Lob (including your uploaded document) and each rendered
   PDF fetched during a proof export. Blobs are `fsync`'d for the same reason.
+- `exports/` holds a durable copy of every proof package you generate, named
+  `<letterId>-<timestamp>.zip` (mode `0600`, `fsync`'d). The download is not the
+  only copy: the server keeps its own, so a lost or interrupted download can be
+  recovered from disk, and each export is a dated evidentiary snapshot.
 
 **Tamper-evidence: the audit log is hash-chained.** Every `audit.log` line
 carries a `seq` (its 1-based position in the file) and a `prev` (the SHA-256 of

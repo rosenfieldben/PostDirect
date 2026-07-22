@@ -66,6 +66,7 @@ test('data-dir permissions are enforced to 0700/0600 even when the dir pre-exist
   const mode = (p) => fs.statSync(p).mode & 0o777;
   assert.strictEqual(mode(dir), 0o700, 'data dir tightened to 0700');
   assert.strictEqual(mode(path.join(dir, 'blobs')), 0o700, 'blobs dir 0700');
+  assert.strictEqual(mode(path.join(dir, 'exports')), 0o700, 'exports dir 0700');
   assert.strictEqual(mode(path.join(dir, 'audit.log')), 0o600, 'audit.log created 0600');
   assert.strictEqual(mode(path.join(dir, 'blobs', blobHex)), 0o600, 'blob file created 0600');
 });
@@ -110,6 +111,7 @@ test('ensureDataDir creates a 0700 tree and probes writability', () => {
   assert.strictEqual(r.ok, true);
   assert.ok(fs.existsSync(dir), 'data dir created');
   assert.ok(fs.existsSync(path.join(dir, 'blobs')), 'blobs/ created');
+  assert.ok(fs.existsSync(path.join(dir, 'exports')), 'exports/ created');
   assert.strictEqual(fs.existsSync(path.join(dir, '.pd-write-test')), false, 'probe file removed');
 });
 
