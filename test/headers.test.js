@@ -31,14 +31,16 @@ test('CSP allows exactly what the app needs and nothing looser', () => {
   assert.ok(!/script-src[^;]*'unsafe-inline'/.test(csp), "script-src must not allow 'unsafe-inline'");
   // style-src still allows 'unsafe-inline': the login page is served pre-auth and
   // its stylesheet cannot be an authenticated /css asset, and the app page uses a
-  // few inline style="" attributes.
-  assert.match(csp, /(^|; )style-src 'self' 'unsafe-inline' https:\/\/fonts\.googleapis\.com(;|$)/);
-  assert.match(csp, /(^|; )font-src https:\/\/fonts\.gstatic\.com(;|$)/);
+  // few inline style="" attributes. The font is self-hosted now, so style-src and
+  // font-src carry no remote origins.
+  assert.match(csp, /(^|; )style-src 'self' 'unsafe-inline'(;|$)/);
+  assert.match(csp, /(^|; )font-src 'self'(;|$)/);
   assert.match(csp, /(^|; )img-src 'self' data:(;|$)/);
   assert.match(csp, /(^|; )connect-src 'self'(;|$)/);
   assert.match(csp, /(^|; )frame-ancestors 'none'(;|$)/);
-  // No remote script/connect origins leaked in.
-  assert.ok(!/script-src[^;]*https?:\/\//.test(csp), 'no remote script origins');
+  // The point of self-hosting the font: the policy names no third-party origin
+  // anywhere. Every source is 'self' (plus 'unsafe-inline'/data:/'none' keywords).
+  assert.ok(!/https?:\/\//.test(csp), 'no remote origins anywhere in the CSP');
 });
 
 test('escapeHtml neutralizes markup and quotes for the login page error sink', () => {

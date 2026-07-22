@@ -64,6 +64,20 @@ test('GET /login returns 200 with the login page and all four security headers',
   assert.ok(r.headers['content-security-policy'], 'CSP header present');
 });
 
+test('HEAD /login returns 200 like GET (monitoring probes), with no body', async () => {
+  const r = await request({ path: '/login', method: 'HEAD' });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body, '', 'Node suppresses the body on HEAD');
+});
+
+test('HEAD /login for an authenticated session redirects to / like GET', async () => {
+  const login = await request({ path: '/login', method: 'POST', headers: FORM }, loginBody('itest-user', 'itest-pass'));
+  const cookie = String(login.headers['set-cookie']).split(';')[0];
+  const r = await request({ path: '/login', method: 'HEAD', headers: { Cookie: cookie } });
+  assert.strictEqual(r.status, 302);
+  assert.strictEqual(r.headers.location, '/');
+});
+
 test('full login round trip: valid POST sets a session cookie that unlocks /', async () => {
   const r = await request({ path: '/login', method: 'POST', headers: FORM }, loginBody('itest-user', 'itest-pass'));
   assert.strictEqual(r.status, 302);
@@ -162,6 +176,22 @@ test('HSTS is sent when the connection is secure and absent otherwise', async ()
   const plain = await request({ path: '/login', method: 'GET' });
   assert.strictEqual(plain.headers['strict-transport-security'], undefined,
     'no HSTS over plain HTTP');
+});
+
+test('self-hosted fonts: authenticated GET serves woff2; anonymous is gated to /login', async () => {
+  const file = '/fonts/source-serif-4-roman-latin.woff2';
+  // No pre-auth carve-out for /fonts: an anonymous request bounces off the auth
+  // gate to /login, exactly like any other static asset. This pins the decision
+  // that the font sits behind auth (the login page uses the Georgia fallback).
+  const anon = await request({ path: file, method: 'GET' });
+  assert.strictEqual(anon.status, 302);
+  assert.strictEqual(anon.headers.location, '/login');
+  // Authenticated, the file serves with the woff2 MIME type (not octet-stream).
+  const login = await request({ path: '/login', method: 'POST', headers: FORM }, loginBody('itest-user', 'itest-pass'));
+  const cookie = String(login.headers['set-cookie']).split(';')[0];
+  const r = await request({ path: file, method: 'GET', headers: { Cookie: cookie } });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.headers['content-type'], 'font/woff2');
 });
 
 test('traversal guard: nothing outside public/ is served', async () => {

@@ -7,7 +7,7 @@
   "author": "Ben Rosenfield",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rosenfieldben/postdirect.git"
+    "url": "git+https://github.com/rosenfieldben/PostDirect.git"
   },
   "scripts": {
     "start": "node server.js",

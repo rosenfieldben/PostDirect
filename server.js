@@ -118,10 +118,13 @@ function redirect(res, url) {
 // handler, so a reflected-XSS injection can no longer execute inline. style-src
 // keeps 'unsafe-inline' deliberately: the login page is served pre-auth and its
 // stylesheet cannot be an authenticated /css asset, and the app page still uses
-// a few inline style="" attributes. Google Fonts (CSS from fonts.googleapis.com
-// + font files from fonts.gstatic.com), data: URIs in CSS, and same-origin
-// fetch to /api/lob remain allowed.
-const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'";
+// a few inline style="" attributes. Every origin in the policy is now 'self':
+// the Source Serif 4 font is self-hosted under /fonts (font-src 'self'), so
+// there are no third-party origins left (the earlier third-party font allowances
+// on style-src and font-src are gone). font-src 'self' is stated explicitly rather
+// than left to default-src so the policy reads as a complete inventory of what
+// the browser may load. img-src keeps data: for the inline SVG data URIs in CSS.
+const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'";
 function setSecurityHeaders(res) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -133,7 +136,7 @@ function setSecurityHeaders(res) {
 // STATIC FILES
 // ══════════════════════════════════════════════════════════════
 const STATIC_DIR = path.join(__dirname, 'public');
-const MIME_TYPES = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.mjs': 'application/javascript', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
+const MIME_TYPES = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.mjs': 'application/javascript', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
 
 function serveStatic(res, filePath) {
   const full = path.join(STATIC_DIR, filePath);
@@ -152,15 +155,16 @@ function serveStatic(res, filePath) {
 // Served PRE-AUTH, so it cannot link the authenticated /css assets; its styles
 // are inline (style-src keeps 'unsafe-inline' for exactly this page). The
 // tokens are copied from public/css/broadsheet.css; retune there first.
+// The app's serif (Source Serif 4) is now a self-hosted static asset under
+// /fonts, which sits BEHIND the auth gate. Carving a pre-auth hole in the gate
+// for font files was considered and deliberately rejected, so this pre-auth
+// page intentionally renders in the Georgia fallback stack, not the brand serif.
 function loginPage(error) {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PostDirect — Sign In</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400..700;1,8..60,400&display=swap" rel="stylesheet">
 <style>
   :root {
     --color-bg: #f3f2f2;
@@ -172,7 +176,7 @@ function loginPage(error) {
     --color-accent-2-700: #aa0b56;
     --color-neutral-400: #bab6b6;
     --color-divider: color-mix(in srgb, #201e1d 16%, transparent);
-    --font-serif: 'Source Serif 4', Georgia, serif;
+    --font-serif: Georgia, serif;
   }
   *, *::before, *::after { box-sizing: border-box; }
   body {
@@ -307,7 +311,11 @@ async function route(req, res) {
   const pathname = url.pathname;
 
   // ── Login page ──
-  if (pathname === '/login' && req.method === 'GET') {
+  // HEAD is served like GET so uptime/monitoring probes (and the generic HEAD a
+  // client may send before a GET) get a 200, not a 302 into the auth gate. Node's
+  // http server strips the body from a HEAD response on its own, so the same
+  // sendHTML call is correct without any special-casing here.
+  if (pathname === '/login' && (req.method === 'GET' || req.method === 'HEAD')) {
     if (validateSession(getSessionToken(req))) return redirect(res, '/');
     return sendHTML(res, 200, loginPage(null));
   }
