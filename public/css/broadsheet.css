@@ -4,8 +4,10 @@
    layout lives in app.css, layered on these classes. Three local changes
    from the vendored original:
    (1) the @import font line is removed;
-   (2) the demo-only CMYK image-separation block (.cmyk and .sep-* rules
-   referencing SVG plate filters absent from this app's DOM) is removed;
+   (2) the demo-only CMYK print treatments are removed: the .cmyk image
+   separation (its .sep-* rules referenced SVG plate filters absent from
+   this app's DOM) and the .cmyk-num / .cmyk-head plate-numeral and headline
+   constructs, along with the --color-process-yellow token they alone used;
    (3) the @font-face block below is added, self-hosting Source Serif 4
    from /fonts so the app page loads its typeface same-origin instead of
    from a third-party font CDN (see public/fonts/README.md for provenance). */
@@ -88,14 +90,6 @@
   --color-accent-2-800: #790e3d;
   --color-accent-2-900: #4b1528;
 
-  /* The third process ink — review round 3: the deck's print treatments
-     (the misregistered plate numerals below) use
-     the three process inks. Cyan and magenta are the system's own accents;
-     this yellow completes them, muted to the same press-ink register. A
-     print treatment color, not an interface accent — body copy and chrome
-     never take it. */
-  --color-process-yellow: #edbb00;
-
   --font-heading: "Source Serif 4", system-ui, sans-serif;
   --font-heading-weight: 600;
   --font-body: "Source Serif 4", system-ui, sans-serif;
@@ -129,80 +123,6 @@ h1, h2, h3, h4 { font-family: var(--font-heading); font-weight: var(--font-headi
 .halftone::after{content:"";position:absolute;inset:0;pointer-events:none;
   background-image:radial-gradient(circle,rgba(0,0,0,0.22) 30%,transparent 32%);
   background-size:3px 3px;mix-blend-mode:multiply}
-
-/* The plate numeral (review rounds 3-4) — display figures set as
-   misregistered process plates, the catalog's cover grammar. Review
-   round 4 (Barron): THREE plates — C, M, Y only, no black plate — so the
-   dark core comes entirely from the C×M×Y multiply overlap (the inks
-   product to exact black), with the fringes the registration drift; and
-   the spread pulled in by half (less jumbled: one figure with plate
-   fringes rather than figures sliding apart). Markup: a .cmyk-num holding
-   a .paper span (the white of the sheet: the glyph's union, built from
-   offset text-shadow copies) and three .plate spans. The construction
-   carries its own ground (--cmyk-num-ground, defaulting to paper) painted
-   on its padding box, so the multiply plates always have their backdrop
-   even inside an isolated stacking context (entrance animations); the
-   padding bleeds wider than any plate offset and the negative margin
-   hands the layout box back. Offsets are em-scaled to the glyph. The
-   .paper span carries the text once for assistive tech; the .plate spans
-   are aria-hidden repeats. */
-.cmyk-num{--cmyk-num-ground:var(--color-bg);
-  position:relative;width:fit-content;line-height:0.9;
-  font-feature-settings:"pnum" 1;
-  background:var(--cmyk-num-ground);padding:0.12em;margin:-0.12em}
-.cmyk-num .paper{color:var(--color-bg); /* the white of the sheet — always paper,
-  whatever the ground: the plates read as printed on paper even when the
-  surrounding page is ink */
-  text-shadow:0.036em 0.025em 0 var(--color-bg),-0.031em -0.023em 0 var(--color-bg)}
-.cmyk-num .plate{position:absolute;inset:0.12em;mix-blend-mode:multiply;
-  text-box:trim-both cap alphabetic /* the host trims to its cap box; each
-  absolute plate must trim its own line the same way, or its glyphs sit a
-  half-leading below the paper union */}
-.cmyk-num .plate-c{color:var(--color-accent)}
-
-/* The plate headline (divergence round 3, Barron: "use both" — the
-   photograph's plates AND the cover grammar's text plates, on the same
-   page). The same three-plate construction as .cmyk-num — paper span
-   carrying the real text, C/M/Y plate repeats, dark core from the
-   multiply overlap — at HALF the numeral's round-4 offsets: the serif's
-   display hairlines are thinner than the numeral strokes the spread was
-   measured on, and the full offsets swallow them whole (probed at the
-   hero's 80px — the fringes read as an anaglyph poster, not a breath
-   out of register) — recut for display
-   headlines that sit in running text blocks on the page's own paper:
-   no ground painting and no padding bleed (the numeral's ground exists
-   for isolated stacking contexts; a headline on the page multiplies
-   straight onto the sheet), no width:fit-content and no line-height
-   override (the host display class owns its metrics — apply this to
-   each .line, which is position:relative for its plates), and the
-   plates are inert to the hand (pointer-events/user-select none, so a
-   triple-click selects the headline once, not four times). Plates take
-   the same pointer lean as .cmyk-num. */
-.cmyk-head{position:relative}
-.cmyk-head .paper{color:var(--color-bg);
-  text-shadow:0.027em 0.0185em 0 var(--color-bg),-0.0245em -0.0175em 0 var(--color-bg)
-  /* the union's copies sit at the construction's halved plate offsets
-     PLUS the full lean (0.018+0.009 / 0.0125+0.006, and mirrored), so
-     the union still backs the plates at viewport-edge lean — invisible
-     on the page's own paper, load-bearing on any other ground */}
-.cmyk-head .plate{position:absolute;inset:0;mix-blend-mode:multiply;
-  pointer-events:none;user-select:none;
-  text-box:trim-both cap alphabetic /* match the host's trim, or the
-  plates sit a half-leading below the paper union */}
-.cmyk-head .plate-c{color:var(--color-accent)}
-.cmyk-head .plate-m{color:var(--color-accent-2);
-  translate:calc(0.018em + 0.009em*var(--press-nx, 0)) calc(0.0125em + 0.006em*var(--press-ny, 0))}
-.cmyk-head .plate-y{color:var(--color-process-yellow);
-  translate:calc(-0.0155em + 0.009em*var(--press-nx, 0)) calc(-0.0115em + 0.006em*var(--press-ny, 0))}
-.cmyk-num .plate-m{color:var(--color-accent-2);
-  translate:calc(0.036em + 0.018em*var(--press-nx, 0)) calc(0.025em + 0.0125em*var(--press-ny, 0))}
-.cmyk-num .plate-y{color:var(--color-process-yellow);
-  translate:calc(-0.031em + 0.018em*var(--press-nx, 0)) calc(-0.023em + 0.0125em*var(--press-ny, 0))}
-/* --press-nx/--press-ny: the pointer lean as a bare -1..1 factor,
-   published on :root by the press driver (print-plates.js) and zero
-   whenever the driver stands down. Each construction scales the lean to
-   its own spread (half of it, here as everywhere) so the moving plates
-   drift a breath toward the cursor and the C plate holds. */
 
 /* ══════════════════════════════════════════════════════════════════════════
    Components — built with the tokens above. Plain CSS
