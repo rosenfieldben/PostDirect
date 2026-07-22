@@ -94,16 +94,30 @@ node server.js
 
 ## Tests
 
-Zero-dependency unit tests using Node's built-in runner (Node ≥ 18):
+Two suites. The unit/integration suite uses Node's built-in runner with no
+dependencies (requires Node ≥ 22.12, matching `package.json` `engines`, so the
+tests can `require()` the frontend ES modules):
 
 ```bash
-npm test     # = node --test
+npm test              # node --test over test/*.test.js
 ```
 
-Covers session signing/validation (including tampered, malformed, and expired
-tokens), constant-time credential comparison, the multipart builder's header
-sanitization, the history status-derivation logic, and the address-verification
-verdict/correction logic.
+It covers the server and the pure frontend modules: session signing and
+validation (tampered, malformed, expired tokens), constant-time credential
+comparison and the two-bucket login rate limiting, the multipart builder's
+header sanitization, the Lob proxy (upstream allowlist, streaming cap,
+timeouts), the durable audit store and proof-export packaging, request-body
+caps, graceful shutdown, route and security-header behavior, and the
+address-verification and history status-derivation logic.
+
+A separate Playwright suite drives a real browser against the app booted over
+a stub Lob upstream, characterizing login, the send flow with honest lifecycle
+labels and proof export, test/live key classification, and that the page talks
+to a single origin:
+
+```bash
+npm run test:browser  # playwright test
+```
 
 ## Environment Variables
 
@@ -182,16 +196,20 @@ records is a deliberate operator action on `PD_DATA_DIR`, outside the app.
 
 ```
 PostDirect/
-├── server.js         # Auth + proxy server (zero dependencies)
-├── package.json      # Node.js manifest
-├── Dockerfile        # Docker deployment (non-root user + healthcheck)
-├── LICENSE           # MIT
-├── .github/
-│   └── workflows/
-│       └── ci.yml    # GitHub Actions: npm test on Node 18/20/22
+├── server.js                 # Composition root: auth, Lob proxy, static serving
+├── lib/                      # Server modules (config, session, ratelimit, store, proof, proxy)
 ├── public/
-│   ├── index.html    # The PostDirect app
-│   └── fonts/        # Self-hosted Source Serif 4 (woff2 + OFL license)
-├── test/             # node:test unit tests (no deps) — run with `npm test`
+│   ├── index.html            # The single-page app
+│   ├── css/                  # broadsheet.css (design system) + app.css (page layer)
+│   ├── js/                   # Frontend ES modules (app.mjs + its unit-tested helpers)
+│   └── fonts/                # Self-hosted Source Serif 4 (woff2 + OFL license)
+├── test/                     # node:test unit/integration suites (no runtime deps)
+│   └── browser/              # Playwright characterization suite
+├── package.json              # Manifest (zero runtime deps; Playwright is the one devDep)
+├── package-lock.json
+├── playwright.config.js
+├── Dockerfile                # Non-root image + healthcheck
+├── LICENSE                   # MIT
+├── .github/workflows/ci.yml  # CI: unit matrix (Node 22, 24), browser, docker
 └── README.md
 ```
