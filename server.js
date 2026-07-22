@@ -307,7 +307,11 @@ async function route(req, res) {
   const pathname = url.pathname;
 
   // ── Login page ──
-  if (pathname === '/login' && req.method === 'GET') {
+  // HEAD is served like GET so uptime/monitoring probes (and the generic HEAD a
+  // client may send before a GET) get a 200, not a 302 into the auth gate. Node's
+  // http server strips the body from a HEAD response on its own, so the same
+  // sendHTML call is correct without any special-casing here.
+  if (pathname === '/login' && (req.method === 'GET' || req.method === 'HEAD')) {
     if (validateSession(getSessionToken(req))) return redirect(res, '/');
     return sendHTML(res, 200, loginPage(null));
   }

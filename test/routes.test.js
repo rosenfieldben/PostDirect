@@ -64,6 +64,20 @@ test('GET /login returns 200 with the login page and all four security headers',
   assert.ok(r.headers['content-security-policy'], 'CSP header present');
 });
 
+test('HEAD /login returns 200 like GET (monitoring probes), with no body', async () => {
+  const r = await request({ path: '/login', method: 'HEAD' });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body, '', 'Node suppresses the body on HEAD');
+});
+
+test('HEAD /login for an authenticated session redirects to / like GET', async () => {
+  const login = await request({ path: '/login', method: 'POST', headers: FORM }, loginBody('itest-user', 'itest-pass'));
+  const cookie = String(login.headers['set-cookie']).split(';')[0];
+  const r = await request({ path: '/login', method: 'HEAD', headers: { Cookie: cookie } });
+  assert.strictEqual(r.status, 302);
+  assert.strictEqual(r.headers.location, '/');
+});
+
 test('full login round trip: valid POST sets a session cookie that unlocks /', async () => {
   const r = await request({ path: '/login', method: 'POST', headers: FORM }, loginBody('itest-user', 'itest-pass'));
   assert.strictEqual(r.status, 302);
