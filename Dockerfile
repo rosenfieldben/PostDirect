@@ -28,8 +28,12 @@ COPY --chown=node:node public/ ./public/
 # until the commit that removed it failed this way). VOLUME only declared an
 # anonymous-volume mount point; explicit mounts (`docker run -v pd-data:/app/data`,
 # compose volumes, Railway's own volume feature) work identically without it, and
-# the mkdir/chown above is what actually provides the writable, node-owned dir.
-RUN mkdir -p /app/data && chown node:node /app/data
+# the mkdir/chown below is what actually provides the writable, node-owned dir.
+# Create it 0700, not the default 0755: the store holds client PII and the exact
+# documents mailed, so it must not be group or other readable. lib/store.js
+# ensureDataDir re-enforces 0700 at startup in case a mounted volume arrives
+# with a looser mode.
+RUN mkdir -p -m 0700 /app/data && chown node:node /app/data
 EXPOSE 3491
 ENV PORT=3491
 ENV NODE_ENV=production

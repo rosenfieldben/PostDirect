@@ -31,6 +31,12 @@ function tryGet(url) {
 function startStub() {
   const letters = new Map();
   let counter = 0;
+  // Capture the Authorization the proof-export letter fetch presents. The export
+  // sent no headers before this pass, so the server fell back to the (unset)
+  // server key and the operator's pasted key never reached Lob. Recording it here
+  // lets a spec prove the pasted key now travels. Only the single-letter GET,
+  // which in the flow is hit solely by proof export, sets this.
+  const captured = { letterGetAuth: null };
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
@@ -91,7 +97,7 @@ function startStub() {
       const m = /^\/v1\/letters\/(ltr_[A-Za-z0-9]+)$/.exec(p);
       if (m) {
         const letter = letters.get(m[1]);
-        if (req.method === 'GET') { return letter ? json(200, letter) : json(404, { error: { message: 'not found' } }); }
+        if (req.method === 'GET') { captured.letterGetAuth = req.headers['authorization'] || null; return letter ? json(200, letter) : json(404, { error: { message: 'not found' } }); }
         if (req.method === 'DELETE') { if (letter) letter.deleted = true; return json(200, { id: m[1], deleted: true }); }
       }
       // US verification: echo the typed address back so no correction prompt.
@@ -108,6 +114,7 @@ function startStub() {
       json(404, { error: { message: 'stub: unhandled ' + req.method + ' ' + p } });
     });
   });
+  server.captured = captured;
   return server;
 }
 
@@ -145,6 +152,8 @@ async function startServers() {
 
   return {
     appUrl, creds, dataDir,
+    // The Authorization the stub last saw on a single-letter GET (proof export).
+    proofLetterAuth: () => stub.captured.letterGetAuth,
     async stop() {
       child.kill('SIGKILL');
       await new Promise((r) => stub.close(() => r()));

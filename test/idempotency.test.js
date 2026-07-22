@@ -60,6 +60,34 @@ test('computeFingerprint is a stable 64-hex digest of the canonical input', asyn
   assert.strictEqual(fp1, expected);
 });
 
+test('the fingerprint ignores the ephemeral recipient id and any unknown key', async () => {
+  // The DOM id that readRecipientFromDOM attaches is incremented by "Send another
+  // letter", so an identical letter must fingerprint the same with id 1, id 2, or
+  // no id at all, or the in-session Send Another flow silently duplicates mail.
+  const addr = { name: 'Jane', company: 'Acme', line1: '1 Main St', line2: 'Ste 2', city: 'NYC', state: 'NY', zip: '10001' };
+  const opts = [['mail_type', 'usps_first_class']];
+  const base = await computeFingerprint(addr, opts, 'h');
+  assert.strictEqual(await computeFingerprint(Object.assign({ id: 1 }, addr), opts, 'h'), base);
+  assert.strictEqual(await computeFingerprint(Object.assign({ id: 2 }, addr), opts, 'h'), base);
+  assert.strictEqual(
+    await computeFingerprint(Object.assign({ id: 1 }, addr), opts, 'h'),
+    await computeFingerprint(Object.assign({ id: 2 }, addr), opts, 'h'),
+    'id 1 vs id 2 must not change the fingerprint'
+  );
+  // Any other unknown key that rides along on the recipient is likewise excluded.
+  assert.strictEqual(await computeFingerprint(Object.assign({ somethingNew: 'x' }, addr), opts, 'h'), base);
+});
+
+test('the fingerprint changes when any allowlisted recipient field changes', async () => {
+  const addr = { name: 'Jane', company: 'Acme', line1: '1 Main St', line2: 'Ste 2', city: 'NYC', state: 'NY', zip: '10001' };
+  const opts = [['mail_type', 'usps_first_class']];
+  const base = await computeFingerprint(addr, opts, 'h');
+  for (const field of ['name', 'company', 'line1', 'line2', 'city', 'state', 'zip']) {
+    const changed = Object.assign({}, addr, { [field]: addr[field] + '-X' });
+    assert.notStrictEqual(await computeFingerprint(changed, opts, 'h'), base, field + ' must affect the fingerprint');
+  }
+});
+
 test('getOrCreatePersistedKey mints once and reuses within the 24h window (survives reload)', () => {
   const storage = fakeStorage();
   let n = 0;

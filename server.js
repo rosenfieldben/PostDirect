@@ -41,7 +41,7 @@ const {
   DATA_DIR, LETTER_ID_RE,
   sha256Hex, normalizeAddressForHash, addressHash,
   ensureDataDir, auditAppend, blobStore, blobPath, readBlob,
-  auditReadLines, auditQuery, findSendsByFingerprint,
+  auditReadLines, auditReadStats, auditQuery, findSendsByFingerprint,
   proxyAuditType, classifyProxyKeyEnv, captureProxyEvent,
 } = require('./lib/store');
 
@@ -130,6 +130,11 @@ function setSecurityHeaders(res) {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Content-Security-Policy', CSP);
+  // Default no-store on every response. History JSON and proxied Lob responses
+  // carry recipient names and addresses, and proof downloads are the mailed
+  // documents themselves; none should land in a shared machine's disk cache.
+  // serveStatic overrides this for non-HTML static assets, which carry no PII.
+  res.setHeader('Cache-Control', 'no-store');
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -137,6 +142,14 @@ function setSecurityHeaders(res) {
 // ══════════════════════════════════════════════════════════════
 const STATIC_DIR = path.join(__dirname, 'public');
 const MIME_TYPES = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.mjs': 'application/javascript', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
+// Served no-store (the setSecurityHeaders default): the HTML shell and the code
+// coupled to it. These load from fixed, unversioned URLs, so if they were cached,
+// a deploy that changed both index.html and a module or stylesheet could leave a
+// returning browser running the fresh (no-store) markup against a stale cached
+// script, breaking the app until the cache expired. Fonts and images are NOT in
+// this set: they are standalone, so a stale one is at most cosmetic, and caching
+// them privately is the point (it spares re-downloading the ~310 KB of woff2).
+const NO_STORE_STATIC_EXTS = new Set(['.html', '.css', '.js', '.mjs']);
 
 function serveStatic(res, filePath) {
   const full = path.join(STATIC_DIR, filePath);
@@ -144,7 +157,12 @@ function serveStatic(res, filePath) {
   fs.readFile(full, (err, data) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
     const ext = path.extname(full);
-    res.writeHead(200, { 'Content-Type': MIME_TYPES[ext] || 'application/octet-stream' });
+    const headers = { 'Content-Type': MIME_TYPES[ext] || 'application/octet-stream' };
+    // Content assets (fonts, images) are cached privately; code (css/js/mjs) and
+    // the HTML shell keep the no-store default so a deploy never serves stale,
+    // markup-coupled code. This writeHead merges over the setHeader'd Cache-Control.
+    if (!NO_STORE_STATIC_EXTS.has(ext)) headers['Cache-Control'] = 'private, max-age=3600';
+    res.writeHead(200, headers);
     res.end(data);
   });
 }
@@ -635,6 +653,7 @@ module.exports = {
   blobPath,
   readBlob,
   auditReadLines,
+  auditReadStats,
   auditQuery,
   findSendsByFingerprint,
   proxyAuditType,

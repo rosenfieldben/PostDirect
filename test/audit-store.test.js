@@ -32,6 +32,68 @@ test('sha256Hex matches node crypto', () => {
   assert.strictEqual(store.sha256Hex(buf), crypto.createHash('sha256').update(buf).digest('hex'));
 });
 
+test('auditReadStats parses good lines around a corrupt MIDDLE line and counts the corruption', () => {
+  const dir = tmpDir();
+  store.ensureDataDir(dir);
+  // A corrupt line in the middle, not just a truncated tail: valid, junk, valid.
+  fs.writeFileSync(path.join(dir, 'audit.log'),
+    JSON.stringify({ type: 'letter.create', letterId: 'ltr_a' }) + '\n' +
+    '{ this is not valid json\n' +
+    JSON.stringify({ type: 'letter.cancel', letterId: 'ltr_b' }) + '\n');
+  const { lines, corruptCount } = store.auditReadStats(dir);
+  assert.strictEqual(corruptCount, 1, 'the middle corrupt line is counted');
+  assert.strictEqual(lines.length, 2, 'both valid lines still parse');
+  assert.strictEqual(lines[0].letterId, 'ltr_a', 'the line before the corruption parsed');
+  assert.strictEqual(lines[1].letterId, 'ltr_b', 'the line after the corruption parsed');
+
+  const clean = tmpDir();
+  store.ensureDataDir(clean);
+  store.auditAppend(clean, { type: 'letter.create', letterId: 'ltr_c' });
+  assert.strictEqual(store.auditReadStats(clean).corruptCount, 0, 'a clean log reports zero');
+});
+
+test('data-dir permissions are enforced to 0700/0600 even when the dir pre-exists 0755', () => {
+  // The Docker image (and a bind mount or restored backup) can hand us a data
+  // directory that already exists with a looser mode, where mkdir's mode is a
+  // no-op. ensureDataDir must tighten it, and the writers must create their files
+  // 0600. (CI is Linux; these mode bits are meaningful here.)
+  const dir = tmpDir();
+  fs.chmodSync(dir, 0o755);
+  const r = store.ensureDataDir(dir);
+  assert.strictEqual(r.ok, true, 'ensureDataDir reports the dir usable');
+  store.auditAppend(dir, { type: 'test.perm' }, 1_000_000_000_000);
+  const blobHex = store.blobStore(dir, Buffer.from('rendered pdf bytes'));
+  const mode = (p) => fs.statSync(p).mode & 0o777;
+  assert.strictEqual(mode(dir), 0o700, 'data dir tightened to 0700');
+  assert.strictEqual(mode(path.join(dir, 'blobs')), 0o700, 'blobs dir 0700');
+  assert.strictEqual(mode(path.join(dir, 'audit.log')), 0o600, 'audit.log created 0600');
+  assert.strictEqual(mode(path.join(dir, 'blobs', blobHex)), 0o600, 'blob file created 0600');
+});
+
+test('ensureDataDir tolerates a chmod failure (a mounted volume it does not own) instead of crashing', () => {
+  // A unit test cannot chown to another uid without root, so simulate the EPERM a
+  // volume owned by a different user would raise by stubbing fs.chmodSync. The
+  // pre-fix code let that EPERM escape and turned a writable-but-unowned mount
+  // into a fatal boot; it must now stay usable and warn instead.
+  const dir = tmpDir();
+  fs.chmodSync(dir, 0o755); // a looser, pre-existing mount we then cannot re-mode
+  const realChmod = fs.chmodSync;
+  const realErr = console.error;
+  const warnings = [];
+  console.error = (m) => { warnings.push(String(m)); };
+  fs.chmodSync = () => { const e = new Error('operation not permitted'); e.code = 'EPERM'; throw e; };
+  let r;
+  try {
+    r = store.ensureDataDir(dir);
+  } finally {
+    fs.chmodSync = realChmod;
+    console.error = realErr;
+  }
+  assert.strictEqual(r.ok, true, 'a dir it cannot chmod is still usable, not a fatal boot error');
+  assert.ok(warnings.some((w) => /could not tighten/.test(w) && /0755/.test(w)),
+    'it warns loudly that the still-loose dir could not be tightened');
+});
+
 test('normalizeAddressForHash is case/whitespace stable and ZIP-prefix stable', () => {
   const a = { line1: '185 Berry St', line2: 'Ste 6100', city: 'San Francisco', state: 'CA', zip: '94107' };
   const b = { line1: '185  BERRY   ST', line2: 'ste 6100', city: 'san francisco', state: 'ca', zip: '94107-1234' };
