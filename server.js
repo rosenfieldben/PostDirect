@@ -40,7 +40,7 @@ const {
 const {
   DATA_DIR, LETTER_ID_RE,
   sha256Hex, normalizeAddressForHash, addressHash,
-  ensureDataDir, auditAppend, blobStore, blobPath, readBlob,
+  ensureDataDir, auditAppend, auditVerifyChain, blobStore, blobPath, readBlob,
   auditReadLines, auditReadStats, auditQuery, findSendsByFingerprint,
   proxyAuditType, classifyProxyKeyEnv, captureProxyEvent,
 } = require('./lib/store');
@@ -649,6 +649,7 @@ module.exports = {
   addressHash,
   ensureDataDir,
   auditAppend,
+  auditVerifyChain,
   blobStore,
   blobPath,
   readBlob,

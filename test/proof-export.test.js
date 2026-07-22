@@ -133,6 +133,16 @@ test('buildProofPackage: seeded letter yields a valid ZIP with all seven entries
   assert.strictEqual(manifest.hasLocalRecord, true, 'the letter.create record is present');
   assert.strictEqual(manifest.auditCorruptLines, 0, 'a clean seeded log reports zero corrupt audit lines');
   assert.strictEqual(manifest.pdfSha256, store.sha256Hex(pdfBytes), 'manifest links the letter to the archived render');
+  // The manifest carries the tamper-evidence result for the whole log the bundle
+  // was drawn from. The seeded log is fully chained (auditAppend wrote seq/prev),
+  // so the chain is intact with no legacy or broken lines. head is the anchorable
+  // commitment; it is the chain verifier's head, computed BEFORE this export's own
+  // proof.export line was appended, so it commits to history as of export time.
+  assert.ok(manifest.chain, 'manifest carries the chain result');
+  assert.strictEqual(manifest.chain.ok, true, 'the seeded chain is intact');
+  assert.strictEqual(manifest.chain.legacyLines, 0, 'auditAppend-written lines are all chained');
+  assert.strictEqual(manifest.chain.firstBreakSeq, null, 'no break in a clean chain');
+  assert.match(manifest.chain.head, /^[0-9a-f]{64}$/, 'head is a sha256 hex commitment');
   for (const f of manifest.files) {
     assert.ok(entries[f.name], 'inventory names a real entry: ' + f.name);
     assert.strictEqual(store.sha256Hex(entries[f.name]), f.sha256, 'manifest hash matches ' + f.name);

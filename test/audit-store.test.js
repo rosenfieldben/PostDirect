@@ -137,6 +137,127 @@ test('auditAppend writes one JSONL line per event with an injected ts, append-on
   assert.strictEqual(Object.keys(first)[0], 'ts');
 });
 
+test('auditAppend stamps a monotonic seq and a prev chain, first prev is genesis', () => {
+  const dir = tmpDir();
+  store.auditAppend(dir, { type: 'a' }, 1000);
+  store.auditAppend(dir, { type: 'b' }, 2000);
+  store.auditAppend(dir, { type: 'c' }, 3000);
+  const lines = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+  assert.deepStrictEqual(lines.map((l) => l.seq), [1, 2, 3], 'seq is 1-based and monotonic');
+  assert.strictEqual(lines[0].prev, '0'.repeat(64), 'the first line points at the genesis 64 zeros');
+  // Each line's prev is the sha256 of the PREVIOUS line's raw bytes (its own
+  // newline excluded), which is the exact chaining a verifier re-derives.
+  const rawLines = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8').split('\n').filter(Boolean);
+  assert.strictEqual(lines[1].prev, store.sha256Hex(Buffer.from(rawLines[0], 'utf8')));
+  assert.strictEqual(lines[2].prev, store.sha256Hex(Buffer.from(rawLines[1], 'utf8')));
+});
+
+test('auditVerifyChain reports ok with the head hash for a clean chained log', () => {
+  const dir = tmpDir();
+  store.auditAppend(dir, { type: 'a' }, 1000);
+  store.auditAppend(dir, { type: 'b' }, 2000);
+  const v = store.auditVerifyChain(dir);
+  assert.strictEqual(v.ok, true);
+  assert.strictEqual(v.checkedLines, 2, 'both chained lines verified');
+  assert.strictEqual(v.legacyLines, 0);
+  assert.strictEqual(v.corruptLines, 0);
+  assert.strictEqual(v.firstBreakSeq, null);
+  // head is the sha256 of the LAST line's raw bytes: the anchorable commitment.
+  const rawLines = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8').split('\n').filter(Boolean);
+  assert.strictEqual(v.head, store.sha256Hex(Buffer.from(rawLines[rawLines.length - 1], 'utf8')));
+});
+
+test('auditVerifyChain: an empty/absent log verifies ok with the genesis head', () => {
+  const v = store.auditVerifyChain(tmpDir());
+  assert.deepStrictEqual(v, { ok: true, checkedLines: 0, legacyLines: 0, corruptLines: 0, firstBreakSeq: null, head: '0'.repeat(64) });
+});
+
+test('auditVerifyChain: tampering a middle line breaks the chain at the NEXT sequence', () => {
+  const dir = tmpDir();
+  store.auditAppend(dir, { type: 'a', n: 1 }, 1000);
+  store.auditAppend(dir, { type: 'b', n: 2 }, 2000);
+  store.auditAppend(dir, { type: 'c', n: 3 }, 3000);
+  // Rewrite line 2 (seq 2) in place, preserving its own seq/prev. Its bytes now
+  // differ, so line 3's recorded prev (the hash of the ORIGINAL line 2) no longer
+  // matches: the break surfaces at seq 3, the first line whose predecessor moved.
+  const lines = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8').split('\n').filter(Boolean);
+  const obj = JSON.parse(lines[1]); obj.n = 999; lines[1] = JSON.stringify(obj);
+  fs.writeFileSync(path.join(dir, 'audit.log'), lines.join('\n') + '\n');
+  const realErr = console.error;
+  const warnings = [];
+  console.error = (m) => { warnings.push(String(m)); };
+  let v;
+  try { v = store.auditVerifyChain(dir); } finally { console.error = realErr; }
+  assert.strictEqual(v.ok, false, 'a tampered line is detected');
+  assert.strictEqual(v.firstBreakSeq, 3, 'the break surfaces at the line after the altered one');
+  assert.ok(warnings.some((w) => /AUDIT CHAIN BROKEN/.test(w) && /seq 3/.test(w)), 'it logs loudly on a break');
+});
+
+test('auditVerifyChain: a legacy prefix (no seq/prev) verifies and is counted, chained lines after it still check', () => {
+  const dir = tmpDir();
+  store.ensureDataDir(dir);
+  // Two pre-chain lines, exactly as an older build wrote them: no seq, no prev.
+  fs.writeFileSync(path.join(dir, 'audit.log'),
+    JSON.stringify({ ts: '2026-01-01T00:00:00.000Z', type: 'letter.create', letterId: 'ltr_legacy1' }) + '\n' +
+    JSON.stringify({ ts: '2026-01-02T00:00:00.000Z', type: 'letter.cancel', letterId: 'ltr_legacy1' }) + '\n');
+  // Now append through auditAppend: it re-scans the tail (no cache for this path),
+  // so the new line's seq continues past the legacy count and its prev commits to
+  // the last legacy line's bytes.
+  store.auditAppend(dir, { type: 'address.verify', addressSha256: 'x' }, 3000);
+  const v = store.auditVerifyChain(dir);
+  assert.strictEqual(v.legacyLines, 2, 'both pre-chain lines are counted as legacy');
+  assert.strictEqual(v.checkedLines, 1, 'the appended chained line verified against the legacy prefix');
+  assert.strictEqual(v.ok, true, 'a legacy prefix followed by a valid chain is not a break');
+  // The appended line carries seq 3 (position over the whole file) and its prev
+  // is the hash of the last legacy line, so the chain commits to the prefix.
+  const lines = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8').split('\n').filter(Boolean);
+  const appended = JSON.parse(lines[2]);
+  assert.strictEqual(appended.seq, 3, 'seq counts the whole file, legacy prefix included');
+  assert.strictEqual(appended.prev, store.sha256Hex(Buffer.from(lines[1], 'utf8')));
+});
+
+test('auditVerifyChain: a corrupt line is reported as corruptLines and its bytes still advance the chain', () => {
+  const dir = tmpDir();
+  store.auditAppend(dir, { type: 'a' }, 1000);
+  // Inject an unparseable line by hand, then confirm both the parse count (via
+  // auditReadStats) and the chain result (via auditVerifyChain) report it. This
+  // is the P3-A corrupt-line fixture shape, now cross-checked against the chain.
+  fs.appendFileSync(path.join(dir, 'audit.log'), '{ this is not json\n');
+  store.auditAppend(dir, { type: 'c' }, 3000);  // re-scans past the corrupt line
+  const realErr = console.error;
+  console.error = () => {};  // silence the loud corruption/break warnings for this test
+  let stats, v;
+  try {
+    stats = store.auditReadStats(dir);
+    v = store.auditVerifyChain(dir);
+  } finally { console.error = realErr; }
+  assert.strictEqual(stats.corruptCount, 1, 'the parse layer counts the corrupt line');
+  assert.strictEqual(v.corruptLines, 1, 'the chain verifier counts the corrupt line');
+  // The corrupt line still advanced the running hash, so the line appended after
+  // it (whose prev was taken from the corrupt line bytes) verifies cleanly.
+  assert.strictEqual(v.ok, true, 'the chain across the corrupt line is intact');
+  assert.strictEqual(v.checkedLines, 2, 'the two chained lines both verify');
+});
+
+test('auditAppend continues the chain after a same-process re-scan (stale tail cache)', () => {
+  const dir = tmpDir();
+  store.auditAppend(dir, { type: 'a' }, 1000);
+  store.auditAppend(dir, { type: 'b' }, 2000);
+  // Truncate the file behind the cache's back to a single line: the on-disk size
+  // no longer matches the cached tail, so the next append must re-scan and chain
+  // onto the CURRENT last line, not the stale cached one.
+  const lines = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8').split('\n').filter(Boolean);
+  fs.writeFileSync(path.join(dir, 'audit.log'), lines[0] + '\n');
+  const realErr = console.error;
+  const warnings = [];
+  console.error = (m) => { warnings.push(String(m)); };
+  try { store.auditAppend(dir, { type: 'c' }, 3000); } finally { console.error = realErr; }
+  assert.ok(warnings.some((w) => /AUDIT TAIL CACHE STALE/.test(w)), 'the size mismatch is logged loudly');
+  const after = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+  assert.deepStrictEqual(after.map((l) => l.seq), [1, 2], 'the re-scan chained onto the truncated file (seq 1 then 2)');
+  assert.strictEqual(store.auditVerifyChain(dir).ok, true, 'the resulting chain verifies');
+});
+
 test('blobStore is content-addressed and write-once; readBlob round-trips; blobPath validates', () => {
   const dir = tmpDir();
   const buf = Buffer.from('the exact bytes sent upstream');

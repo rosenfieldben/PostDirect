@@ -167,10 +167,28 @@ rejected):
   event with a UTC timestamp: `letter.create` (with the HTTP status, letter ID,
   idempotency key, fingerprint, and the derived `test`/`live` classification),
   `letter.cancel`, `address.verify`, and `proof.export`. Lines are never
-  rewritten or deleted by the app. Failed sends (non-2xx) are recorded too.
+  rewritten or deleted by the app. Failed sends (non-2xx) are recorded too. Each
+  line is written with an `fsync`, so a line the app reported as recorded is on
+  stable storage, not just in the OS cache, before the response is sent.
 - `blobs/` holds content-addressed raw bytes (`blobs/<sha256hex>`): the exact
   request bytes sent to Lob (including your uploaded document) and each rendered
-  PDF fetched during a proof export.
+  PDF fetched during a proof export. Blobs are `fsync`'d for the same reason.
+
+**Tamper-evidence: the audit log is hash-chained.** Every `audit.log` line
+carries a `seq` (its 1-based position in the file) and a `prev` (the SHA-256 of
+the previous line's raw bytes; the first line points at 64 zeros). Because each
+line commits to the exact bytes of the one before it, altering, inserting, or
+removing any line breaks the chain at the following line, and the break is
+detectable without any external record. The chain is verified on every proof
+export and the result travels in the package `manifest.json` under `chain`
+(`ok`, `checkedLines`, `legacyLines`, `firstBreakSeq`, and `head`). A break also
+logs loudly server-side. Lines written by an older build that predate the chain
+have no `seq`/`prev`; they are tolerated, counted as `legacyLines`, and the
+first chained line after them commits to their bytes, so the prefix is anchored
+too. `chain.head` (the hash of the log's last line) is an **anchorable external
+commitment**: record it somewhere outside the server (a note, a timestamped
+email, a countersignature) and any later rewrite of history becomes provable,
+because the recomputed head will no longer match what you anchored.
 
 **It contains client PII and the documents you mailed.** Treat the directory as
 sensitive: restrict its permissions (it is `0700`), keep it off any web-served
