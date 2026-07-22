@@ -495,7 +495,11 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     ).join('');
     runReviewVerification(rs);
 
-    // The letter as it prints: sender block + date, the body, the sheet footer.
+    // The preview sheet: the body (which prints as written) or the uploaded PDF
+    // (which prints as uploaded), framed by an on-screen guide (sender block,
+    // date, footer) that is NOT part of the payload sent to Lob. Lob adds its own
+    // address imprint, and the exact page rendering is Lob's, so the frame here is
+    // orientation only, never a promise of the printed page.
     const from = getFrom();
     const senderLines = [from.name, from.company, from.line1 + (from.line2 ? ', ' + from.line2 : ''), from.city + ', ' + from.state + ' ' + from.zip]
       .filter(Boolean).map(esc).join('<br/>');
@@ -503,7 +507,10 @@ import { confirmDuplicateSends } from './duplicate.mjs';
       '<div class="letter-sheet-sender">' + senderLines + '</div>' +
       '<div class="letter-sheet-date">' + esc(letterSheetDate()) + '</div>' +
     '</div>';
-    const sheetFoot = '<div class="letter-sheet-foot"><span>Page 1 of 1</span><span>8.5 × 11″ · Letter</span></div>';
+    // No "Page 1 of 1": the app cannot know Lob's page count. The footer, like
+    // the sender block and date above, is preview chrome, so it names itself a
+    // guide rather than asserting anything about the printed sheet.
+    const sheetFoot = '<div class="letter-sheet-foot"><span>Sheet frame shown as an on-screen guide</span><span>8.5 × 11″ · Letter</span></div>';
     if (contentMode === 'write') {
       const b = v('letter-body');
       $('review-body').innerHTML = sheetTop +

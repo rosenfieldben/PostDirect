@@ -9,6 +9,10 @@ test('send flow: honest labels, proof export, and the duplicate warning', async 
 
   // ── Send a letter through the wizard ──
   await composeToReview(page);
+  // The review preview tells the truth: the sheet frame is labelled an on-screen
+  // guide, not the printed page (Item 6). No "as it prints" or "Page 1 of 1".
+  await expect(page.locator('#review-body')).toContainText('on-screen guide');
+  await expect(page.locator('#review-body')).not.toContainText('Page 1 of 1');
   await page.click('#btn-next'); // Send (no prior send yet, so no duplicate prompt)
   await page.waitForSelector('#step-4:not(.is-hidden)');
 
