@@ -1,6 +1,6 @@
 # ✉ PostDirect — Web Edition
 
-[![CI](https://github.com/rosenfieldben/postdirect/actions/workflows/ci.yml/badge.svg)](https://github.com/rosenfieldben/postdirect/actions/workflows/ci.yml)
+[![CI](https://github.com/rosenfieldben/PostDirect/actions/workflows/ci.yml/badge.svg)](https://github.com/rosenfieldben/PostDirect/actions/workflows/ci.yml)
 
 Send physical USPS letters from any browser, secured with login authentication.
 
