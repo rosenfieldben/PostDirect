@@ -131,6 +131,7 @@ test('buildProofPackage: seeded letter yields a valid ZIP with all seven entries
   assert.deepStrictEqual(manifest.missing, [], 'nothing missing on the happy path');
   assert.strictEqual(manifest.complete, true, 'a full bundle is marked complete');
   assert.strictEqual(manifest.hasLocalRecord, true, 'the letter.create record is present');
+  assert.strictEqual(manifest.auditCorruptLines, 0, 'a clean seeded log reports zero corrupt audit lines');
   for (const f of manifest.files) {
     assert.ok(entries[f.name], 'inventory names a real entry: ' + f.name);
     assert.strictEqual(store.sha256Hex(entries[f.name]), f.sha256, 'manifest hash matches ' + f.name);
@@ -148,6 +149,7 @@ test('buildProofPackage: seeded letter yields a valid ZIP with all seven entries
   const exportEvents = store.auditReadLines(dir).filter((l) => l.type === 'proof.export');
   assert.strictEqual(exportEvents.length, 1);
   assert.strictEqual(exportEvents[0].packageSha256, pkg.packageSha256);
+  assert.strictEqual(exportEvents[0].auditCorruptLines, 0, 'the export event records the corrupt-line count');
   assert.deepStrictEqual(exportEvents[0].fetched.sort(), ['rendered.pdf', 'tracking.json']);
 });
 

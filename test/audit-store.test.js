@@ -32,6 +32,26 @@ test('sha256Hex matches node crypto', () => {
   assert.strictEqual(store.sha256Hex(buf), crypto.createHash('sha256').update(buf).digest('hex'));
 });
 
+test('auditReadStats parses good lines around a corrupt MIDDLE line and counts the corruption', () => {
+  const dir = tmpDir();
+  store.ensureDataDir(dir);
+  // A corrupt line in the middle, not just a truncated tail: valid, junk, valid.
+  fs.writeFileSync(path.join(dir, 'audit.log'),
+    JSON.stringify({ type: 'letter.create', letterId: 'ltr_a' }) + '\n' +
+    '{ this is not valid json\n' +
+    JSON.stringify({ type: 'letter.cancel', letterId: 'ltr_b' }) + '\n');
+  const { lines, corruptCount } = store.auditReadStats(dir);
+  assert.strictEqual(corruptCount, 1, 'the middle corrupt line is counted');
+  assert.strictEqual(lines.length, 2, 'both valid lines still parse');
+  assert.strictEqual(lines[0].letterId, 'ltr_a', 'the line before the corruption parsed');
+  assert.strictEqual(lines[1].letterId, 'ltr_b', 'the line after the corruption parsed');
+
+  const clean = tmpDir();
+  store.ensureDataDir(clean);
+  store.auditAppend(clean, { type: 'letter.create', letterId: 'ltr_c' });
+  assert.strictEqual(store.auditReadStats(clean).corruptCount, 0, 'a clean log reports zero');
+});
+
 test('data-dir permissions are enforced to 0700/0600 even when the dir pre-exists 0755', () => {
   // The Docker image (and a bind mount or restored backup) can hand us a data
   // directory that already exists with a looser mode, where mkdir's mode is a
