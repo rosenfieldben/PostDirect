@@ -11,7 +11,7 @@
    from a third-party font CDN (see public/fonts/README.md for provenance). */
 
 /* Source Serif 4, self-hosted (see public/fonts/README.md for provenance and
-   license). The unicode-range values are copied verbatim from Google's CSS, so
+   license). The unicode-range values are copied verbatim from the upstream webfont CSS, so
    a browser fetches a subset file only when the page uses a glyph in its range;
    font-display: swap preserves the previous <link>-loaded swap behavior. The
    upright face is variable over 400..700; the italic ships at weight 400. */
@@ -89,8 +89,8 @@
   --color-accent-2-900: #4b1528;
 
   /* The third process ink — review round 3: the deck's print treatments
-     (the misregistered plate numerals below) need
-     the full four-color set. Cyan and magenta are the system's own accents;
+     (the misregistered plate numerals below) use
+     the three process inks. Cyan and magenta are the system's own accents;
      this yellow completes them, muted to the same press-ink register. A
      print treatment color, not an interface accent — body copy and chrome
      never take it. */
