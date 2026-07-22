@@ -130,6 +130,11 @@ function setSecurityHeaders(res) {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Content-Security-Policy', CSP);
+  // Default no-store on every response. History JSON and proxied Lob responses
+  // carry recipient names and addresses, and proof downloads are the mailed
+  // documents themselves; none should land in a shared machine's disk cache.
+  // serveStatic overrides this for non-HTML static assets, which carry no PII.
+  res.setHeader('Cache-Control', 'no-store');
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -144,7 +149,14 @@ function serveStatic(res, filePath) {
   fs.readFile(full, (err, data) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
     const ext = path.extname(full);
-    res.writeHead(200, { 'Content-Type': MIME_TYPES[ext] || 'application/octet-stream' });
+    const headers = { 'Content-Type': MIME_TYPES[ext] || 'application/octet-stream' };
+    // Non-HTML static assets (css, js, mjs, fonts, images) sit behind the auth
+    // gate and carry no PII, so a private (per-user, not shared) cache is fine and
+    // spares re-downloading the ~310 KB of self-hosted woff2 on every page view.
+    // index.html stays no-store (the default from setSecurityHeaders): it is the
+    // app shell, and this writeHead merges over the setHeader'd Cache-Control.
+    if (ext !== '.html') headers['Cache-Control'] = 'private, max-age=3600';
+    res.writeHead(200, headers);
     res.end(data);
   });
 }
