@@ -71,6 +71,39 @@ test('data-dir permissions are enforced to 0700/0600 even when the dir pre-exist
   assert.strictEqual(mode(path.join(dir, 'blobs', blobHex)), 0o600, 'blob file created 0600');
 });
 
+test('writeDurable fsyncs the parent directory when it CREATES a file, not on a plain append', () => {
+  // A newly created file needs its parent directory fsync'd for the directory
+  // ENTRY (the name) to be crash-durable; fsync of the file fd alone is not
+  // enough. A plain append to an existing file adds no directory entry, so the
+  // hot path must NOT pay that fsync. Classify each fsync by whether its fd is a
+  // directory to tell the two apart.
+  const dir = tmpDir();
+  store.ensureDataDir(dir); // creates the tree BEFORE the spy, so it is not counted
+  const realFsync = fs.fsyncSync;
+  let dirFsyncs = 0, fileFsyncs = 0;
+  fs.fsyncSync = (fd) => {
+    try { if (fs.fstatSync(fd).isDirectory()) dirFsyncs += 1; else fileFsyncs += 1; } catch (_) { /* ignore */ }
+    return realFsync.call(fs, fd);
+  };
+  try {
+    // First line CREATES audit.log -> its parent directory is fsync'd.
+    store.auditAppend(dir, { type: 'a' }, 1000);
+    assert.ok(dirFsyncs >= 1, 'creating audit.log fsyncs its parent directory');
+    // Second line APPENDS to the now-existing audit.log -> no new entry, no dir fsync.
+    const beforeAppend = dirFsyncs;
+    store.auditAppend(dir, { type: 'b' }, 2000);
+    assert.strictEqual(dirFsyncs, beforeAppend, 'appending to an existing file does not fsync the directory');
+    // A new blob CREATES blobs/<hex> -> the blobs directory is fsync'd.
+    const beforeBlob = dirFsyncs;
+    store.blobStore(dir, Buffer.from('fresh blob bytes for the fsync test'));
+    assert.ok(dirFsyncs > beforeBlob, 'a newly created blob fsyncs the blobs directory');
+    // Every write still fsyncs its own file (log create, log append, blob).
+    assert.ok(fileFsyncs >= 3, 'each write fsyncs its own file descriptor');
+  } finally {
+    fs.fsyncSync = realFsync;
+  }
+});
+
 test('ensureDataDir tolerates a chmod failure (a mounted volume it does not own) instead of crashing', () => {
   // A unit test cannot chown to another uid without root, so simulate the EPERM a
   // volume owned by a different user would raise by stubbing fs.chmodSync. The
@@ -334,6 +367,7 @@ test('captureProxyEvent records a letter.create linked to its intent, with a blo
   assert.strictEqual(ev.fingerprint, 'f'.repeat(64));
   assert.strictEqual(ev.recipientSha256, 'a'.repeat(64), 'X-PD-Recipient-Hash is captured for verification correlation');
   assert.strictEqual(ev.keyEnv, 'live');
+  assert.strictEqual(ev.env, 'live', 'env is derived from the upstream key and stamped for correlation');
   assert.strictEqual(ev.requestBlobSha256, store.sha256Hex(reqBuf));
   assert.strictEqual(ev.requestBytes, reqBuf.length);
   // The blob was stored at intent time (not by the capture), and still holds the
@@ -372,6 +406,28 @@ test('captureProxyEvent records cancel (letter id from path) and verify (address
   assert.strictEqual(verify.addressSha256,
     store.addressHash({ line1: '185 Berry St', line2: 'Ste 6100', city: 'San Francisco', state: 'CA', zip: '94107' }),
     'verify event address hash correlates to the same normalized recipient');
+});
+
+test('captureProxyEvent derives env onto every captured event, defaulting to envUnknown', () => {
+  // env is what the proof-export correlation keys on, and it is DERIVED here (not
+  // seeded), so it must be asserted through captureProxyEvent. A test key yields
+  // 'test' on all three event types; an unclassifiable (non-Basic) upstream auth
+  // must fall back to 'envUnknown', never null, or the correlation's env guard
+  // silently degrades to "matches anything".
+  const testAuth = 'Basic ' + Buffer.from('test_k:').toString('base64');
+  const dirT = tmpDir();
+  store.captureProxyEvent(dirT, 'letter.create', '/v1/letters', {}, testAuth, Buffer.from('b'), 200, Buffer.from(JSON.stringify({ id: 'ltr_e1' })));
+  store.captureProxyEvent(dirT, 'letter.cancel', '/v1/letters/ltr_e1', {}, testAuth, Buffer.alloc(0), 200, Buffer.from(JSON.stringify({ id: 'ltr_e1', deleted: true })));
+  store.captureProxyEvent(dirT, 'address.verify', '/v1/us_verifications', {}, testAuth, Buffer.from(JSON.stringify({ primary_line: '1 A St', city: 'X', state: 'NY', zip_code: '10001' })), 200, Buffer.from(JSON.stringify({ deliverability: 'deliverable' })));
+  for (const l of store.auditReadLines(dirT)) {
+    assert.strictEqual(l.env, 'test', l.type + ' env derived from the test key');
+  }
+  // A non-Basic upstream auth cannot be classified -> keyEnv null -> env 'envUnknown'.
+  const dirU = tmpDir();
+  store.captureProxyEvent(dirU, 'letter.create', '/v1/letters', {}, 'Bearer opaque-token', Buffer.from('b'), 200, Buffer.from(JSON.stringify({ id: 'ltr_e2' })));
+  const ev = store.auditReadLines(dirU)[0];
+  assert.strictEqual(ev.keyEnv, null, 'a non-Basic auth is unclassifiable');
+  assert.strictEqual(ev.env, 'envUnknown', 'env falls back to the sentinel, never null');
 });
 
 test('writeSendIntent stores the request blob and records a send.intent that unresolvedIntents surfaces', () => {

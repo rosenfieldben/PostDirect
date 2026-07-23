@@ -226,6 +226,40 @@ test('buildProofPackage: correlation attaches a verification only on matching en
   assert.deepStrictEqual(byBasis, ['env-match', 'legacy-envUnknown'], 'the manifest states each attachment basis');
 });
 
+test('buildProofPackage: correlation acts on the env DERIVED by captureProxyEvent, end-to-end', async () => {
+  // The other correlation tests hand-seed env via auditAppend. This one produces
+  // env the real way (captureProxyEvent derives it from the upstream key) so a
+  // regression that dropped or misderived env would fail HERE. Two verifications
+  // of the same recipient, one under a test key and one under a live key, are
+  // captured before a live-key send; only the live one may attach.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pd-proof-env-e2e-'));
+  const testAuth = 'Basic ' + Buffer.from('test_k:').toString('base64');
+  const liveAuth = 'Basic ' + Buffer.from('live_k:').toString('base64');
+  const verifyBody = Buffer.from(JSON.stringify({ primary_line: '99 Pine St', city: 'Denver', state: 'CO', zip_code: '80202' }));
+  // Captured newest-last; all three land within milliseconds, so both verifies
+  // precede the send and fall inside the 24h window. Tag the responses to tell
+  // the attached verification apart.
+  store.captureProxyEvent(dir, 'address.verify', '/v1/us_verifications', {}, testAuth, verifyBody, 200, Buffer.from(JSON.stringify({ deliverability: 'deliverable', tag: 'TEST' })));
+  store.captureProxyEvent(dir, 'address.verify', '/v1/us_verifications', {}, liveAuth, verifyBody, 200, Buffer.from(JSON.stringify({ deliverability: 'deliverable', tag: 'LIVE' })));
+  const createResp = Buffer.from(JSON.stringify({ id: 'ltr_enve2e', to: { address_line1: '99 Pine St', address_line2: '', address_city: 'Denver', address_state: 'CO', address_zip: '80202' } }));
+  store.captureProxyEvent(dir, 'letter.create', '/v1/letters', {}, liveAuth, Buffer.from('body'), 200, createResp, 'intent-e2e');
+
+  // env was DERIVED, not seeded: prove it before relying on it.
+  const lines = store.auditReadLines(dir);
+  assert.strictEqual(lines.find((l) => l.type === 'letter.create').env, 'live');
+  const verifyEnvs = lines.filter((l) => l.type === 'address.verify').map((l) => l.env).sort();
+  assert.deepStrictEqual(verifyEnvs, ['live', 'test'], 'each verification carries the env derived from its own key');
+
+  const pkg = await store.buildProofPackage(dir, 'ltr_enve2e', {
+    now: () => Date.now() + 1000,
+    fetchLetter: async () => ({ ok: false, status: 404 }),
+    fetchAsset: async () => ({ ok: false, status: 404 }),
+  });
+  const verifs = JSON.parse(readZip(pkg.zip)['verifications.json'].toString('utf8'));
+  assert.strictEqual(verifs.length, 1, 'the cross-env (test) verification is rejected for a live send');
+  assert.strictEqual(verifs[0].response.tag, 'LIVE', 'only the same-env verification attaches');
+});
+
 test('buildProofPackage: a 404 on the rendered PDF still succeeds and records the miss', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pd-proof-miss-'));
   seedLetter(dir, 'ltr_miss1');

@@ -137,6 +137,7 @@ test('POST /v1/letters writes the intent BEFORE contacting Lob, then a linked le
   assert.strictEqual(ev.idempotencyKey, 'idem-capture-1');
   assert.strictEqual(ev.fingerprint, 'a'.repeat(64));
   assert.strictEqual(ev.keyEnv, 'test', 'derived from the client key, which is never stored');
+  assert.strictEqual(ev.env, 'test', 'the normalized env is derived and stamped end-to-end through the proxy');
   assert.strictEqual(ev.requestBlobSha256, intent.requestBlob, 'the outcome references the intent-time blob');
 
   // The blob (written at intent time) holds exactly the bytes the stub received.
