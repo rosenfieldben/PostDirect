@@ -42,7 +42,7 @@ const {
   sha256Hex, normalizeAddressForHash, addressHash,
   ensureDataDir, auditAppend, auditVerifyChain, blobStore, blobPath, readBlob,
   auditReadLines, auditReadStats, auditQuery, findSendsByFingerprint,
-  proxyAuditType, classifyProxyKeyEnv, captureProxyEvent,
+  proxyAuditType, classifyProxyKeyEnv, captureProxyEvent, firstHeader,
   writeSendIntent, unresolvedIntents, appendIntentResolution, ledgerRows,
 } = require('./lib/store');
 
@@ -53,6 +53,30 @@ const {
 const {
   lobAuthorization, proxyTargetFor, handleProxy,
 } = require('./lib/proxy');
+
+const {
+  accessConfigFromEnv, createJwksClient, createEnforcer,
+} = require('./lib/access');
+
+// ══════════════════════════════════════════════════════════════
+// CLOUDFLARE ACCESS PERIMETER
+// ══════════════════════════════════════════════════════════════
+// Origin enforcement of the edge perimeter. Built once from the environment: both
+// PD_ACCESS_* vars set turns it ON, both unset leaves it OFF (enforcer.enabled is
+// false and route() skips it entirely), exactly one set is a FATAL boot error
+// caught by validateStartupConfig. The JWKS certs URL is normally derived from
+// the team domain; PD_ACCESS_CERTS_URL overrides it for integration tests to
+// point at a local stub (operator-only, same trust level as PD_LOB_UPSTREAM).
+// The background key priming (accessClient.start) is deliberately NOT called
+// here: requiring this module must stay inert, so it runs only at the entrypoint.
+const ACCESS = accessConfigFromEnv(process.env);
+let accessClient = null;
+let accessEnforcer = { enabled: false };
+if (ACCESS.enabled) {
+  const certsUrl = (process.env.PD_ACCESS_CERTS_URL || '').trim() || ACCESS.certsUrl;
+  accessClient = createJwksClient({ certsUrl });
+  accessEnforcer = createEnforcer(ACCESS, accessClient);
+}
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -329,6 +353,39 @@ async function route(req, res) {
   }
   const pathname = url.pathname;
 
+  // ── Health check (exempt from BOTH the perimeter and the session gate) ──
+  // The Docker HEALTHCHECK runs INSIDE the container and can never carry an
+  // Access assertion, so it must be reachable without one. It stays inert on
+  // purpose: no session read, no store read, no version string, nothing an
+  // unauthenticated prober can learn beyond "the process is up".
+  if (pathname === '/healthz') {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('ok');
+  }
+
+  // ── Cloudflare Access perimeter (before session parsing, routing, static) ──
+  // When enforcement is enabled, EVERY request past /healthz must present a valid
+  // Cf-Access-Jwt-Assertion, verified before anything else runs. Only the header
+  // is accepted (the CF_Authorization cookie is deliberately ignored: one carrier,
+  // no cookie-shaped surface). A failure is fail-closed with a generic body; the
+  // real reason goes to the log only, so an origin-direct prober learns nothing
+  // about which check it failed. A missing key cache is OUR outage, not a bad
+  // token, so it answers 503 (try again) rather than 403 (forbidden).
+  if (accessEnforcer.enabled) {
+    const assertion = firstHeader(req.headers['cf-access-jwt-assertion']);
+    const result = await accessEnforcer.check(assertion, Date.now());
+    if (!result.ok) {
+      if (result.noKeys) {
+        console.error('Access perimeter: no JWKS keys available (' + result.reason + ') for ' + pathname + '; answering 503.');
+        res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '30' });
+        return res.end(JSON.stringify({ error: { message: 'Service unavailable' } }));
+      }
+      console.error('Access perimeter: refused ' + pathname + ' (' + result.reason + ').');
+      return sendJSON(res, 403, { error: { message: 'Forbidden' } });
+    }
+    // Success is silent: logging every allowed request would be one line per hit.
+  }
+
   // ── Login page ──
   // HEAD is served like GET so uptime/monitoring probes (and the generic HEAD a
   // client may send before a GET) get a 200, not a 302 into the auth gate. Node's
@@ -565,6 +622,15 @@ if (require.main === module) {
     console.error('FATAL: ' + dataCheck.error);
     process.exit(1);
   }
+  // Prime the Access JWKS cache and keep it fresh (only when enforcement is on,
+  // and only here at the entrypoint so require stays inert). A fetch failure at
+  // boot is NOT fatal: the client retries with capped backoff and enforced
+  // requests fail closed with 503 until keys arrive, so a JWKS hiccup never
+  // crash-loops a deployment that is otherwise healthy.
+  if (accessEnforcer.enabled && accessClient) {
+    console.log('  Cloudflare Access perimeter: ENFORCED (' + ACCESS.teamDomain + ').');
+    accessClient.start();
+  }
   // Last-resort safety net for anything that escapes the per-request try/catch
   // (timers, stream callbacks, native emitters). Log and keep serving rather
   // than let Node's default policy terminate the process. Installed only as the
@@ -654,6 +720,10 @@ if (require.main === module) {
 // test imports (require('./server')) keep working without churn.
 module.exports = {
   server,
+  // The Access enforcer/client are exported so in-process integration tests can
+  // prime the JWKS cache from a stub instead of the network.
+  accessEnforcer,
+  accessClient,
   signValue,
   createSession,
   validateSession,

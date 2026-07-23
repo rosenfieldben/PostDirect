@@ -173,6 +173,23 @@ test('validateStartupConfig refuses each weak or default credential individually
   assert.strictEqual(validateStartupConfig({ ...GOOD_ENV, PD_SECRET: 'x'.repeat(32) }).ok, true);
 });
 
+test('validateStartupConfig treats a half-configured Access perimeter as fatal', () => {
+  // Both set or both unset are fine; exactly one set is a boot error, because a
+  // half-configured perimeter reads as protected while enforcing nothing.
+  assert.strictEqual(validateStartupConfig({ ...GOOD_ENV }).ok, true, 'neither var: fine');
+  assert.strictEqual(validateStartupConfig({ ...GOOD_ENV, PD_ACCESS_TEAM_DOMAIN: 'acme.cloudflareaccess.com', PD_ACCESS_AUD: 'a1' }).ok, true, 'both vars: fine');
+  const onlyDomain = validateStartupConfig({ ...GOOD_ENV, PD_ACCESS_TEAM_DOMAIN: 'acme.cloudflareaccess.com' });
+  assert.strictEqual(onlyDomain.ok, false);
+  assert.ok(onlyDomain.errors.some((e) => /half-configured/.test(e)), 'error names the half-config');
+  const onlyAud = validateStartupConfig({ ...GOOD_ENV, PD_ACCESS_AUD: 'a1' });
+  assert.strictEqual(onlyAud.ok, false);
+  assert.ok(onlyAud.errors.some((e) => /half-configured/.test(e)));
+  // A bad team domain (both set) is also fatal.
+  const badDomain = validateStartupConfig({ ...GOOD_ENV, PD_ACCESS_TEAM_DOMAIN: 'evil.example.com', PD_ACCESS_AUD: 'a1' });
+  assert.strictEqual(badDomain.ok, false);
+  assert.ok(badDomain.errors.some((e) => /team domain/.test(e)));
+});
+
 test('PD_INSECURE_LOCAL_DEMO=1 permits defaults but forces a loopback bind', () => {
   const demo = validateStartupConfig({ PD_INSECURE_LOCAL_DEMO: '1' });
   assert.strictEqual(demo.ok, true, 'defaults allowed under the demo flag');
@@ -194,6 +211,13 @@ test('booting on defaults exits nonzero, with and without NODE_ENV=production', 
     assert.match(r.stderr(), /FATAL: PD_PASSWORD/);
     assert.match(r.stderr(), /PD_INSECURE_LOCAL_DEMO/, 'the demo escape hatch is mentioned');
   }
+});
+
+test('a half-configured Access perimeter exits nonzero at boot', async () => {
+  const r = await expectExit(spawnServer({ ...GOOD_ENV, PD_ACCESS_TEAM_DOMAIN: 'acme.cloudflareaccess.com' }), 10000);
+  assert.ok(r, 'server must exit, not boot');
+  assert.notStrictEqual(r.code, 0, 'a half-configured perimeter must not boot');
+  assert.match(r.stderr(), /FATAL: .*half-configured/);
 });
 
 // ── Data directory validation (item 1): unwritable PD_DATA_DIR is fatal ──

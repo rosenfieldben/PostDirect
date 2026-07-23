@@ -34,6 +34,11 @@ test('Cache-Control: no-store on pages/API, private caching only for non-HTML st
     r.on('error', reject); r.end();
   });
   try {
+    // /healthz answers 200 'ok' with no assertion in the UNENFORCED mode this
+    // suite runs in (its enforced-mode counterpart is in access-enforcement).
+    const health = await get('/healthz');
+    assert.strictEqual(health.status, 200);
+    assert.strictEqual(health.headers['cache-control'], 'no-store');
     // Pre-auth login page (HTML): no-store.
     assert.strictEqual((await get('/login')).headers['cache-control'], 'no-store');
     // Authenticate to reach the gated routes.

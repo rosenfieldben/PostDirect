@@ -39,9 +39,12 @@ ENV PORT=3491
 ENV NODE_ENV=production
 # Drop root: run as the built-in unprivileged "node" user.
 USER node
-# Alpine ships busybox wget (no curl) — use it to probe the login page.
-# Shell-form CMD so ${PORT} expands: the server binds $PORT, so a probe hardcoded
-# to 3491 would fail (and loop-restart the container) under any port override.
+# Alpine ships busybox wget (no curl), so use it to probe the health endpoint.
+# Probe /healthz, not /login: this check runs INSIDE the container and can never
+# carry a Cloudflare Access assertion, so once the perimeter is enforced /login
+# would 403 and loop-restart an otherwise healthy container. /healthz is exempt
+# from the perimeter by design. Shell-form CMD so ${PORT} expands: the server
+# binds $PORT, so a probe hardcoded to 3491 would fail under any port override.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget -q -O /dev/null "http://localhost:${PORT}/login" || exit 1
+  CMD wget -q -O /dev/null "http://localhost:${PORT}/healthz" || exit 1
 CMD ["node", "server.js"]
