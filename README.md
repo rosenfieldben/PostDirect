@@ -131,6 +131,8 @@ npm run test:browser  # playwright test
 | `PD_DATA_DIR`        | No       | `<app>/data` | Directory for the durable send store: an append-only `audit.log` plus content-addressed `blobs/`. Created mode `0700`; new `audit.log` and blob files are written `0600`. At startup the directory is re-tightened to `0700` when the process owns it (a pre-created dir or a volume it owns); a mounted volume owned by another user is left as-is, with a loud warning if it is looser than `0700`, rather than refusing to boot. An unwritable path is a fatal startup error. Holds client PII and the exact documents mailed, so it lives outside `public/` and is never web-served. Back it up and protect it. See "Records and retention". |
 | `PD_SECURE_COOKIES`  | No       | (auto)     | `1`/`0` to force the cookie `Secure` flag on/off. Default auto-detects HTTPS via `X-Forwarded-Proto`. |
 | `PD_TRUST_PROXY`     | No       | `0`        | `1`/`true` to derive the client IP for login rate-limiting from the leftmost `X-Forwarded-For` entry. **Enable ONLY behind a trusted reverse proxy** (Railway/Render/nginx); otherwise clients can spoof `X-Forwarded-For` to evade the per-IP limit. When the Access perimeter is enforced, the rate limiter instead prefers Cloudflare's authoritative `CF-Connecting-IP` (still canonicalized), since every request reaching the limiter has already passed the edge and leftmost `X-Forwarded-For` is client-influenced. |
+| `PD_ACCESS_TEAM_DOMAIN` | No    | (none)     | Your Cloudflare Access team domain, exactly `<team>.cloudflareaccess.com`. When set (together with `PD_ACCESS_AUD`), the origin enforces Cloudflare Access on every request: it fetches the team's signing keys from `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs` and requires a valid `Cf-Access-Jwt-Assertion` whose issuer is `https://<team>.cloudflareaccess.com`. Find it in the Cloudflare **Zero Trust** dashboard (your team name is in the URL and under Settings). **Both `PD_ACCESS_*` or neither**: setting exactly one is a fatal startup error. |
+| `PD_ACCESS_AUD`      | No       | (none)     | The Application Audience (**AUD**) tag of the Cloudflare Access application protecting this hostname. Every assertion's `aud` must contain it, so a token minted for a different Access app is rejected. Copy it from the Access application's **Overview** page (Zero Trust, Access, Applications). Required together with `PD_ACCESS_TEAM_DOMAIN`; see "Putting the app behind Cloudflare Access". |
 | `NODE_ENV`           | No       | (none)         | No effect on the credential checks: they apply under every value, including unset. (Earlier versions only enforced them when this was exactly `production`.) |
 | `PORT`               | No       | `3491`     | Server port                                                                                          |
 
@@ -149,6 +151,94 @@ npm run test:browser  # playwright test
 - Credentials and secrets are never persisted or logged: not `PD_PASSWORD`, not `PD_SECRET`, not the Lob API key (the audit store records only the derived `test`/`live` classification), not session cookies. (The startup banner prints the configured username and the password *length*; the proxy logs upstream *error* objects to stderr.) Send data (the letter request, Lob's response, the rendered PDF) **is** now deliberately persisted to the durable store, which contains client PII: see "Records and retention"
 - The request handler is wrapped so a malformed request (e.g. an invalid `Host` header) returns `400`/`500` instead of crashing the process, and server-level socket timeouts bound slow-body/slowloris connections
 - The Lob proxy streams responses via `stream.pipeline` and tears down the upstream request if the client disconnects, so aborted transfers can't leak upstream sockets
+- When `PD_ACCESS_TEAM_DOMAIN` and `PD_ACCESS_AUD` are set, the origin enforces Cloudflare Access on every request before anything else runs (the one exception is the inert `/healthz`): it validates the `Cf-Access-Jwt-Assertion` RS256 token against the team's signing keys and refuses anything else with a generic `403` (a `503` while its key cache is cold). This is defense in depth, not a replacement for the login: it is what finally bounds online password guessing from the open internet. See "Putting the app behind Cloudflare Access"
+
+## Putting the app behind Cloudflare Access
+
+The env vars above only mean something once the app is actually reachable **only**
+through Cloudflare. This runbook sets that up. You perform these steps in the
+Cloudflare and Railway dashboards; the origin enforcement (above) is what makes
+them binding rather than decorative.
+
+1. **Add your custom domain to Cloudflare.** Put the domain (or subdomain, e.g.
+   `mail.yourfirm.com`) on a Cloudflare zone, with the DNS record **Proxied**
+   (the orange cloud), not DNS-only. Proxied is what routes visitors through
+   Cloudflare's edge so Access can gate them; a grey-cloud (DNS-only) record
+   points straight at the origin and skips Access entirely.
+2. **Add the same custom domain to Railway.** In the Railway service, add the
+   custom domain and follow its DNS instructions (a `CNAME` to the Railway
+   target, created as a **Proxied** record in Cloudflare).
+3. **Set Cloudflare SSL/TLS to Full (strict).** Under SSL/TLS, choose **Full
+   (strict)** so Cloudflare validates the origin certificate end to end, rather
+   than trusting an unauthenticated origin leg.
+4. **Create the Access application.** In **Zero Trust, Access, Applications**,
+   add a self-hosted application for the exact hostname, and add a policy that
+   allows only the people who should reach the app (your email, an MFA rule, and
+   so on). On the application's **Overview** page, copy the **Application Audience
+   (AUD)** tag.
+5. **Set the two env vars on Railway.** `PD_ACCESS_TEAM_DOMAIN` =
+   `<team>.cloudflareaccess.com` (your team domain), `PD_ACCESS_AUD` = the AUD tag
+   from the previous step. Deploy. The startup banner prints `Cloudflare Access
+   perimeter: ENFORCED`. Setting exactly one of the two is a fatal startup error
+   by design.
+6. **Remove the Railway-generated public domain.** Railway assigns a
+   `*.up.railway.app` hostname that points straight at the origin and is **not**
+   behind Cloudflare. Delete it, so the custom proxied hostname is the only door.
+   Leaving it in place is the classic hole: the perimeter is enforced on the name
+   you protected while the generated name is wide open, so the origin enforcement
+   is doing exactly its job by refusing direct hits, but an attacker who finds the
+   generated name still faces only the inner login.
+
+**Verify it.** Three checks, from a shell and a browser:
+
+```
+# 1. A request straight to the origin, with no Access assertion, is refused.
+curl -si https://mail.yourfirm.com/ | head -n 1        # expect: HTTP/2 403
+
+# 2. The health check is exempt and answers, so the container stays healthy.
+curl -s  https://mail.yourfirm.com/healthz             # expect: ok
+
+# 3. In a browser, visit https://mail.yourfirm.com/ : Cloudflare Access
+#    presents its login (and MFA), and only after that do you reach PostDirect's
+#    own login page. Both layers are present, in that order.
+```
+
+If check 1 returns anything other than `403` (or `503`), the origin is reachable
+without passing Access: recheck that the record is Proxied and that the generated
+Railway domain is gone.
+
+**Operational notes.**
+
+- **Key rotation is automatic.** Cloudflare rotates its signing keys; the origin
+  refreshes the JWKS on a 6-hour TTL and also refetches on demand when a token
+  presents a key id it has not seen (floored to once every 30 seconds). You do
+  nothing.
+- **A `503` with `Retry-After: 30` means the origin cannot reach the team's key
+  endpoint** (`/cdn-cgi/access/certs`). It is fail-closed (no request is let
+  through unverified) and self-healing (the origin keeps retrying with backoff),
+  so it clears on its own once connectivity returns. A burst of them points at an
+  origin-side network problem, not a client problem.
+- **The inner PostDirect login stays, on purpose.** Access authenticates *who*
+  reaches the origin; the app's own login is the second, independent factor and
+  the thing that actually gates the mailing controls. Do not remove it.
+
+### What the perimeter is, and is not
+
+**What it is.** Cloudflare Access authenticates and MFA-gates every request at the
+edge, and this app makes the origin **refuse** anything that did not come through
+it: no valid `Cf-Access-Jwt-Assertion`, no entry, checked before the session, the
+router, or any static file. It is what bounds online password guessing against
+the inner login from the open internet.
+
+**What it is not.** It does not change what the app records, and it does not
+encrypt the store (`PD_DATA_DIR` still holds client PII in the clear; see
+"Records and retention"). It does not replace the inner login; it sits in front
+of it. And it protects only what is actually reached through the proxied
+hostname: if you have not completed the runbook, custom domain proxied and the
+Railway-generated domain removed, then setting `PD_ACCESS_TEAM_DOMAIN` and
+`PD_ACCESS_AUD` alone protects nothing that is still reachable through an
+unproxied name. The env vars enforce the perimeter; the dashboard steps are what
+put the app behind it.
 
 ## Records and retention
 
