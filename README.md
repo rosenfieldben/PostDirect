@@ -192,7 +192,11 @@ first chained line after them commits to their bytes, so the prefix is anchored
 too. `chain.head` (the hash of the log's last line) is an **anchorable external
 commitment**: record it somewhere outside the server (a note, a timestamped
 email, a countersignature) and any later rewrite of history becomes provable,
-because the recomputed head will no longer match what you anchored.
+because the recomputed head will no longer match what you anchored. Appends are
+serialized by an advisory lock file (`audit.log.lock`), so even if a second
+process is accidentally pointed at the same `PD_DATA_DIR` (a stray double start,
+a restore job), two writers cannot interleave and leave the chain looking
+tampered; a lock abandoned by a crashed writer is reclaimed automatically.
 
 **Write-ahead intents: a send is recorded before it happens.** Before the proxy
 contacts Lob for a mutating call (creating or cancelling a letter), it appends a

@@ -7,6 +7,7 @@
 const os = require('node:os');
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 
 process.env.PD_SECRET = process.env.PD_SECRET || 'test-secret-fixed-value-0123456789';
 const NEVER_CREATED = path.join(os.tmpdir(), 'pd-should-not-exist-' + process.pid);
@@ -102,6 +103,64 @@ test('writeDurable fsyncs the parent directory when it CREATES a file, not on a 
   } finally {
     fs.fsyncSync = realFsync;
   }
+});
+
+test('auditAppend leaves no lock file behind after a normal append', () => {
+  const dir = tmpDir();
+  store.auditAppend(dir, { type: 'a' }, 1000);
+  assert.strictEqual(fs.existsSync(path.join(dir, 'audit.log.lock')), false,
+    'the append lock is released (unlinked) once the append completes');
+});
+
+test('auditAppend steals a stale lock (a holder that crashed mid-append) and still appends', () => {
+  const dir = tmpDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Simulate a lock abandoned by a crashed process: create it, then backdate its
+  // mtime far past LOCK_STALE_MS so acquireAppendLock treats it as dead and steals
+  // it instead of blocking every future append forever.
+  const lockPath = path.join(dir, 'audit.log.lock');
+  fs.writeFileSync(lockPath, '999999', { mode: 0o600 });
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(lockPath, old, old);
+  store.auditAppend(dir, { type: 'after-stale' }, 2000); // must not hang; must steal and proceed
+  const lines = store.auditReadLines(dir);
+  assert.strictEqual(lines.length, 1, 'the append succeeded after stealing the stale lock');
+  assert.strictEqual(lines[0].type, 'after-stale');
+  assert.strictEqual(fs.existsSync(lockPath), false, 'the stolen lock is cleaned up on release');
+});
+
+test('the append lock serializes concurrent writers: the chain stays intact across processes', async () => {
+  // The regression guard for the concurrency finding: without a cross-process
+  // lock, two writers reading the same tail size both compute seq=N+1 and the
+  // second line breaks the chain. Spawn several real processes hammering the same
+  // audit.log and assert the result is a single unbroken chain with contiguous,
+  // collision-free seqs.
+  const dir = tmpDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const storePath = path.join(__dirname, '..', 'lib', 'store.js');
+  const WRITERS = 4;
+  const PER_WRITER = 25;
+  const child = (tag) => new Promise((resolve, reject) => {
+    const code = 'const s=require(process.env.S);const d=process.env.D;const t=process.env.T;' +
+      'for(let i=0;i<' + PER_WRITER + ';i++){s.auditAppend(d,{type:"c",tag:t,i},Date.now());}';
+    const p = spawn(process.execPath, ['-e', code], {
+      env: Object.assign({}, process.env, { S: storePath, D: dir, T: tag }),
+      stdio: ['ignore', 'ignore', 'inherit'],
+    });
+    p.on('error', reject);
+    p.on('exit', (codeOut) => codeOut === 0 ? resolve() : reject(new Error('writer ' + tag + ' exited ' + codeOut)));
+  });
+  await Promise.all(Array.from({ length: WRITERS }, (_, i) => child('w' + i)));
+
+  const total = WRITERS * PER_WRITER;
+  const chain = store.auditVerifyChain(dir);
+  assert.strictEqual(chain.ok, true, 'no false tamper flag: the cross-process chain is intact');
+  assert.strictEqual(chain.corruptLines, 0, 'no torn/interleaved writes');
+  const lines = store.auditReadLines(dir);
+  assert.strictEqual(lines.length, total, 'every append landed (' + total + ' lines)');
+  const seqs = lines.map((l) => l.seq).sort((a, b) => a - b);
+  assert.deepStrictEqual(seqs, Array.from({ length: total }, (_, i) => i + 1),
+    'seqs are contiguous 1..N with no collision or gap');
 });
 
 test('ensureDataDir tolerates a chmod failure (a mounted volume it does not own) instead of crashing', () => {
