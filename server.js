@@ -38,11 +38,12 @@ const {
 } = require('./lib/ratelimit');
 
 const {
-  DATA_DIR, LETTER_ID_RE,
+  DATA_DIR, LETTER_ID_RE, INTENT_ID_RE,
   sha256Hex, normalizeAddressForHash, addressHash,
-  ensureDataDir, auditAppend, blobStore, blobPath, readBlob,
+  ensureDataDir, auditAppend, auditVerifyChain, blobStore, blobPath, readBlob,
   auditReadLines, auditReadStats, auditQuery, findSendsByFingerprint,
   proxyAuditType, classifyProxyKeyEnv, captureProxyEvent,
+  writeSendIntent, unresolvedIntents, appendIntentResolution, ledgerRows,
 } = require('./lib/store');
 
 const {
@@ -470,6 +471,37 @@ async function route(req, res) {
     return res.end(pkg.zip);
   }
 
+  // ── Local durable record (authenticated) ──
+  // The server's own system of record, independent of Lob: the ledger rows
+  // (sends, cancels, exports, reconciliations) plus the reconciliation worklist
+  // (intents with no recorded outcome). Read straight from the local log, so it
+  // needs no Lob key and works even when the account list cannot be loaded.
+  if (pathname === '/api/ledger' && req.method === 'GET') {
+    const lines = auditReadLines(DATA_DIR);
+    return sendJSON(res, 200, { rows: ledgerRows(lines), unresolvedIntents: unresolvedIntents(DATA_DIR) });
+  }
+
+  // ── Manually resolve a write-ahead intent (authenticated) ──
+  // The reconciliation action for an intent whose send outcome was never
+  // recorded (a crash or lost response between the intent and Lob's reply). The
+  // operator checks Lob and records what actually happened. This never re-sends
+  // anything: it only appends the operator's determination to the record.
+  if (pathname.startsWith('/api/intents/') && pathname.endsWith('/resolve') && req.method === 'POST') {
+    const intentId = pathname.slice('/api/intents/'.length, -'/resolve'.length);
+    // Ground rule: validate the id format before it is used to look one up.
+    if (!INTENT_ID_RE.test(intentId)) {
+      return sendJSON(res, 400, { error: { message: 'Invalid intent id' } });
+    }
+    const bodyBuf = await readBody(req, res, LOGIN_BODY_LIMIT); // a resolution body is tiny JSON
+    if (bodyBuf === null) return; // 413/400 already sent
+    let body;
+    try { body = JSON.parse(bodyBuf.toString('utf8') || '{}'); }
+    catch (e) { return sendJSON(res, 400, { error: { message: 'Invalid JSON' } }); }
+    const r = appendIntentResolution(DATA_DIR, intentId, body, Date.now());
+    if (!r.ok) return sendJSON(res, r.status || 400, { error: { message: r.error } });
+    return sendJSON(res, 200, { ok: true, intentId, resolution: r.event.resolution });
+  }
+
   // ── Lob API proxy ──
   if (pathname.startsWith('/api/lob/')) {
     return handleProxy(req, res, pathname, url.search, { readBody, sendJSON });
@@ -644,11 +676,13 @@ module.exports = {
   validateStartupConfig,
   // Persistence / audit store
   DATA_DIR,
+  INTENT_ID_RE,
   sha256Hex,
   normalizeAddressForHash,
   addressHash,
   ensureDataDir,
   auditAppend,
+  auditVerifyChain,
   blobStore,
   blobPath,
   readBlob,
@@ -659,6 +693,10 @@ module.exports = {
   proxyAuditType,
   classifyProxyKeyEnv,
   captureProxyEvent,
+  writeSendIntent,
+  unresolvedIntents,
+  appendIntentResolution,
+  ledgerRows,
   // Proof export
   crc32,
   zipStore,

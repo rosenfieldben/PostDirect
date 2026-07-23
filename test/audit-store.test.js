@@ -7,6 +7,7 @@
 const os = require('node:os');
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 
 process.env.PD_SECRET = process.env.PD_SECRET || 'test-secret-fixed-value-0123456789';
 const NEVER_CREATED = path.join(os.tmpdir(), 'pd-should-not-exist-' + process.pid);
@@ -66,8 +67,100 @@ test('data-dir permissions are enforced to 0700/0600 even when the dir pre-exist
   const mode = (p) => fs.statSync(p).mode & 0o777;
   assert.strictEqual(mode(dir), 0o700, 'data dir tightened to 0700');
   assert.strictEqual(mode(path.join(dir, 'blobs')), 0o700, 'blobs dir 0700');
+  assert.strictEqual(mode(path.join(dir, 'exports')), 0o700, 'exports dir 0700');
   assert.strictEqual(mode(path.join(dir, 'audit.log')), 0o600, 'audit.log created 0600');
   assert.strictEqual(mode(path.join(dir, 'blobs', blobHex)), 0o600, 'blob file created 0600');
+});
+
+test('writeDurable fsyncs the parent directory when it CREATES a file, not on a plain append', () => {
+  // A newly created file needs its parent directory fsync'd for the directory
+  // ENTRY (the name) to be crash-durable; fsync of the file fd alone is not
+  // enough. A plain append to an existing file adds no directory entry, so the
+  // hot path must NOT pay that fsync. Classify each fsync by whether its fd is a
+  // directory to tell the two apart.
+  const dir = tmpDir();
+  store.ensureDataDir(dir); // creates the tree BEFORE the spy, so it is not counted
+  const realFsync = fs.fsyncSync;
+  let dirFsyncs = 0, fileFsyncs = 0;
+  fs.fsyncSync = (fd) => {
+    try { if (fs.fstatSync(fd).isDirectory()) dirFsyncs += 1; else fileFsyncs += 1; } catch (_) { /* ignore */ }
+    return realFsync.call(fs, fd);
+  };
+  try {
+    // First line CREATES audit.log -> its parent directory is fsync'd.
+    store.auditAppend(dir, { type: 'a' }, 1000);
+    assert.ok(dirFsyncs >= 1, 'creating audit.log fsyncs its parent directory');
+    // Second line APPENDS to the now-existing audit.log -> no new entry, no dir fsync.
+    const beforeAppend = dirFsyncs;
+    store.auditAppend(dir, { type: 'b' }, 2000);
+    assert.strictEqual(dirFsyncs, beforeAppend, 'appending to an existing file does not fsync the directory');
+    // A new blob CREATES blobs/<hex> -> the blobs directory is fsync'd.
+    const beforeBlob = dirFsyncs;
+    store.blobStore(dir, Buffer.from('fresh blob bytes for the fsync test'));
+    assert.ok(dirFsyncs > beforeBlob, 'a newly created blob fsyncs the blobs directory');
+    // Every write still fsyncs its own file (log create, log append, blob).
+    assert.ok(fileFsyncs >= 3, 'each write fsyncs its own file descriptor');
+  } finally {
+    fs.fsyncSync = realFsync;
+  }
+});
+
+test('auditAppend leaves no lock file behind after a normal append', () => {
+  const dir = tmpDir();
+  store.auditAppend(dir, { type: 'a' }, 1000);
+  assert.strictEqual(fs.existsSync(path.join(dir, 'audit.log.lock')), false,
+    'the append lock is released (unlinked) once the append completes');
+});
+
+test('auditAppend steals a stale lock (a holder that crashed mid-append) and still appends', () => {
+  const dir = tmpDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Simulate a lock abandoned by a crashed process: create it, then backdate its
+  // mtime far past LOCK_STALE_MS so acquireAppendLock treats it as dead and steals
+  // it instead of blocking every future append forever.
+  const lockPath = path.join(dir, 'audit.log.lock');
+  fs.writeFileSync(lockPath, '999999', { mode: 0o600 });
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(lockPath, old, old);
+  store.auditAppend(dir, { type: 'after-stale' }, 2000); // must not hang; must steal and proceed
+  const lines = store.auditReadLines(dir);
+  assert.strictEqual(lines.length, 1, 'the append succeeded after stealing the stale lock');
+  assert.strictEqual(lines[0].type, 'after-stale');
+  assert.strictEqual(fs.existsSync(lockPath), false, 'the stolen lock is cleaned up on release');
+});
+
+test('the append lock serializes concurrent writers: the chain stays intact across processes', async () => {
+  // The regression guard for the concurrency finding: without a cross-process
+  // lock, two writers reading the same tail size both compute seq=N+1 and the
+  // second line breaks the chain. Spawn several real processes hammering the same
+  // audit.log and assert the result is a single unbroken chain with contiguous,
+  // collision-free seqs.
+  const dir = tmpDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const storePath = path.join(__dirname, '..', 'lib', 'store.js');
+  const WRITERS = 4;
+  const PER_WRITER = 25;
+  const child = (tag) => new Promise((resolve, reject) => {
+    const code = 'const s=require(process.env.S);const d=process.env.D;const t=process.env.T;' +
+      'for(let i=0;i<' + PER_WRITER + ';i++){s.auditAppend(d,{type:"c",tag:t,i},Date.now());}';
+    const p = spawn(process.execPath, ['-e', code], {
+      env: Object.assign({}, process.env, { S: storePath, D: dir, T: tag }),
+      stdio: ['ignore', 'ignore', 'inherit'],
+    });
+    p.on('error', reject);
+    p.on('exit', (codeOut) => codeOut === 0 ? resolve() : reject(new Error('writer ' + tag + ' exited ' + codeOut)));
+  });
+  await Promise.all(Array.from({ length: WRITERS }, (_, i) => child('w' + i)));
+
+  const total = WRITERS * PER_WRITER;
+  const chain = store.auditVerifyChain(dir);
+  assert.strictEqual(chain.ok, true, 'no false tamper flag: the cross-process chain is intact');
+  assert.strictEqual(chain.corruptLines, 0, 'no torn/interleaved writes');
+  const lines = store.auditReadLines(dir);
+  assert.strictEqual(lines.length, total, 'every append landed (' + total + ' lines)');
+  const seqs = lines.map((l) => l.seq).sort((a, b) => a - b);
+  assert.deepStrictEqual(seqs, Array.from({ length: total }, (_, i) => i + 1),
+    'seqs are contiguous 1..N with no collision or gap');
 });
 
 test('ensureDataDir tolerates a chmod failure (a mounted volume it does not own) instead of crashing', () => {
@@ -110,6 +203,7 @@ test('ensureDataDir creates a 0700 tree and probes writability', () => {
   assert.strictEqual(r.ok, true);
   assert.ok(fs.existsSync(dir), 'data dir created');
   assert.ok(fs.existsSync(path.join(dir, 'blobs')), 'blobs/ created');
+  assert.ok(fs.existsSync(path.join(dir, 'exports')), 'exports/ created');
   assert.strictEqual(fs.existsSync(path.join(dir, '.pd-write-test')), false, 'probe file removed');
 });
 
@@ -135,6 +229,127 @@ test('auditAppend writes one JSONL line per event with an injected ts, append-on
   assert.strictEqual(first.type, 'letter.create');
   // ts is the first key so events are self-describing at a glance.
   assert.strictEqual(Object.keys(first)[0], 'ts');
+});
+
+test('auditAppend stamps a monotonic seq and a prev chain, first prev is genesis', () => {
+  const dir = tmpDir();
+  store.auditAppend(dir, { type: 'a' }, 1000);
+  store.auditAppend(dir, { type: 'b' }, 2000);
+  store.auditAppend(dir, { type: 'c' }, 3000);
+  const lines = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+  assert.deepStrictEqual(lines.map((l) => l.seq), [1, 2, 3], 'seq is 1-based and monotonic');
+  assert.strictEqual(lines[0].prev, '0'.repeat(64), 'the first line points at the genesis 64 zeros');
+  // Each line's prev is the sha256 of the PREVIOUS line's raw bytes (its own
+  // newline excluded), which is the exact chaining a verifier re-derives.
+  const rawLines = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8').split('\n').filter(Boolean);
+  assert.strictEqual(lines[1].prev, store.sha256Hex(Buffer.from(rawLines[0], 'utf8')));
+  assert.strictEqual(lines[2].prev, store.sha256Hex(Buffer.from(rawLines[1], 'utf8')));
+});
+
+test('auditVerifyChain reports ok with the head hash for a clean chained log', () => {
+  const dir = tmpDir();
+  store.auditAppend(dir, { type: 'a' }, 1000);
+  store.auditAppend(dir, { type: 'b' }, 2000);
+  const v = store.auditVerifyChain(dir);
+  assert.strictEqual(v.ok, true);
+  assert.strictEqual(v.checkedLines, 2, 'both chained lines verified');
+  assert.strictEqual(v.legacyLines, 0);
+  assert.strictEqual(v.corruptLines, 0);
+  assert.strictEqual(v.firstBreakSeq, null);
+  // head is the sha256 of the LAST line's raw bytes: the anchorable commitment.
+  const rawLines = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8').split('\n').filter(Boolean);
+  assert.strictEqual(v.head, store.sha256Hex(Buffer.from(rawLines[rawLines.length - 1], 'utf8')));
+});
+
+test('auditVerifyChain: an empty/absent log verifies ok with the genesis head', () => {
+  const v = store.auditVerifyChain(tmpDir());
+  assert.deepStrictEqual(v, { ok: true, checkedLines: 0, legacyLines: 0, corruptLines: 0, firstBreakSeq: null, head: '0'.repeat(64) });
+});
+
+test('auditVerifyChain: tampering a middle line breaks the chain at the NEXT sequence', () => {
+  const dir = tmpDir();
+  store.auditAppend(dir, { type: 'a', n: 1 }, 1000);
+  store.auditAppend(dir, { type: 'b', n: 2 }, 2000);
+  store.auditAppend(dir, { type: 'c', n: 3 }, 3000);
+  // Rewrite line 2 (seq 2) in place, preserving its own seq/prev. Its bytes now
+  // differ, so line 3's recorded prev (the hash of the ORIGINAL line 2) no longer
+  // matches: the break surfaces at seq 3, the first line whose predecessor moved.
+  const lines = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8').split('\n').filter(Boolean);
+  const obj = JSON.parse(lines[1]); obj.n = 999; lines[1] = JSON.stringify(obj);
+  fs.writeFileSync(path.join(dir, 'audit.log'), lines.join('\n') + '\n');
+  const realErr = console.error;
+  const warnings = [];
+  console.error = (m) => { warnings.push(String(m)); };
+  let v;
+  try { v = store.auditVerifyChain(dir); } finally { console.error = realErr; }
+  assert.strictEqual(v.ok, false, 'a tampered line is detected');
+  assert.strictEqual(v.firstBreakSeq, 3, 'the break surfaces at the line after the altered one');
+  assert.ok(warnings.some((w) => /AUDIT CHAIN BROKEN/.test(w) && /seq 3/.test(w)), 'it logs loudly on a break');
+});
+
+test('auditVerifyChain: a legacy prefix (no seq/prev) verifies and is counted, chained lines after it still check', () => {
+  const dir = tmpDir();
+  store.ensureDataDir(dir);
+  // Two pre-chain lines, exactly as an older build wrote them: no seq, no prev.
+  fs.writeFileSync(path.join(dir, 'audit.log'),
+    JSON.stringify({ ts: '2026-01-01T00:00:00.000Z', type: 'letter.create', letterId: 'ltr_legacy1' }) + '\n' +
+    JSON.stringify({ ts: '2026-01-02T00:00:00.000Z', type: 'letter.cancel', letterId: 'ltr_legacy1' }) + '\n');
+  // Now append through auditAppend: it re-scans the tail (no cache for this path),
+  // so the new line's seq continues past the legacy count and its prev commits to
+  // the last legacy line's bytes.
+  store.auditAppend(dir, { type: 'address.verify', addressSha256: 'x' }, 3000);
+  const v = store.auditVerifyChain(dir);
+  assert.strictEqual(v.legacyLines, 2, 'both pre-chain lines are counted as legacy');
+  assert.strictEqual(v.checkedLines, 1, 'the appended chained line verified against the legacy prefix');
+  assert.strictEqual(v.ok, true, 'a legacy prefix followed by a valid chain is not a break');
+  // The appended line carries seq 3 (position over the whole file) and its prev
+  // is the hash of the last legacy line, so the chain commits to the prefix.
+  const lines = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8').split('\n').filter(Boolean);
+  const appended = JSON.parse(lines[2]);
+  assert.strictEqual(appended.seq, 3, 'seq counts the whole file, legacy prefix included');
+  assert.strictEqual(appended.prev, store.sha256Hex(Buffer.from(lines[1], 'utf8')));
+});
+
+test('auditVerifyChain: a corrupt line is reported as corruptLines and its bytes still advance the chain', () => {
+  const dir = tmpDir();
+  store.auditAppend(dir, { type: 'a' }, 1000);
+  // Inject an unparseable line by hand, then confirm both the parse count (via
+  // auditReadStats) and the chain result (via auditVerifyChain) report it. This
+  // is the P3-A corrupt-line fixture shape, now cross-checked against the chain.
+  fs.appendFileSync(path.join(dir, 'audit.log'), '{ this is not json\n');
+  store.auditAppend(dir, { type: 'c' }, 3000);  // re-scans past the corrupt line
+  const realErr = console.error;
+  console.error = () => {};  // silence the loud corruption/break warnings for this test
+  let stats, v;
+  try {
+    stats = store.auditReadStats(dir);
+    v = store.auditVerifyChain(dir);
+  } finally { console.error = realErr; }
+  assert.strictEqual(stats.corruptCount, 1, 'the parse layer counts the corrupt line');
+  assert.strictEqual(v.corruptLines, 1, 'the chain verifier counts the corrupt line');
+  // The corrupt line still advanced the running hash, so the line appended after
+  // it (whose prev was taken from the corrupt line bytes) verifies cleanly.
+  assert.strictEqual(v.ok, true, 'the chain across the corrupt line is intact');
+  assert.strictEqual(v.checkedLines, 2, 'the two chained lines both verify');
+});
+
+test('auditAppend continues the chain after a same-process re-scan (stale tail cache)', () => {
+  const dir = tmpDir();
+  store.auditAppend(dir, { type: 'a' }, 1000);
+  store.auditAppend(dir, { type: 'b' }, 2000);
+  // Truncate the file behind the cache's back to a single line: the on-disk size
+  // no longer matches the cached tail, so the next append must re-scan and chain
+  // onto the CURRENT last line, not the stale cached one.
+  const lines = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8').split('\n').filter(Boolean);
+  fs.writeFileSync(path.join(dir, 'audit.log'), lines[0] + '\n');
+  const realErr = console.error;
+  const warnings = [];
+  console.error = (m) => { warnings.push(String(m)); };
+  try { store.auditAppend(dir, { type: 'c' }, 3000); } finally { console.error = realErr; }
+  assert.ok(warnings.some((w) => /AUDIT TAIL CACHE STALE/.test(w)), 'the size mismatch is logged loudly');
+  const after = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+  assert.deepStrictEqual(after.map((l) => l.seq), [1, 2], 'the re-scan chained onto the truncated file (seq 1 then 2)');
+  assert.strictEqual(store.auditVerifyChain(dir).ok, true, 'the resulting chain verifies');
 });
 
 test('blobStore is content-addressed and write-once; readBlob round-trips; blobPath validates', () => {
@@ -189,27 +404,36 @@ test('classifyProxyKeyEnv derives test/live from Basic auth and never returns th
   assert.strictEqual(store.classifyProxyKeyEnv('Bearer whatever'), null, 'non-Basic yields no classification');
 });
 
-test('captureProxyEvent records a letter.create with a blob and no Authorization material', () => {
+test('captureProxyEvent records a letter.create linked to its intent, with a blob and no Authorization material', () => {
   const dir = tmpDir();
   const reqBuf = Buffer.from('--boundary multipart bytes--');
   const resp = Buffer.from(JSON.stringify({ id: 'ltr_capture1', object: 'letter' }));
   const reqHeaders = { 'idempotency-key': 'idem-123', 'x-pd-fingerprint': 'f'.repeat(64), 'x-pd-recipient-hash': 'a'.repeat(64) };
   const upstreamAuth = 'Basic ' + Buffer.from('live_secretkey:').toString('base64');
-  store.captureProxyEvent(dir, 'letter.create', '/v1/letters', reqHeaders, upstreamAuth, reqBuf, 200, resp);
+  // The real flow writes the intent (which stores the request-body blob) BEFORE
+  // Lob is contacted; the outcome capture then references that blob and links
+  // back to the intent by id. Mirror that order here.
+  const intentId = store.writeSendIntent(dir, { lobPath: '/v1/letters', reqHeaders, reqBuf }, 1000);
+  store.captureProxyEvent(dir, 'letter.create', '/v1/letters', reqHeaders, upstreamAuth, reqBuf, 200, resp, intentId);
 
   const lines = store.auditReadLines(dir);
-  assert.strictEqual(lines.length, 1);
-  const ev = lines[0];
-  assert.strictEqual(ev.type, 'letter.create');
+  assert.strictEqual(lines.length, 2, 'the intent line and the outcome line');
+  const ev = lines.find((l) => l.type === 'letter.create');
   assert.strictEqual(ev.status, 200);
   assert.strictEqual(ev.letterId, 'ltr_capture1');
+  assert.strictEqual(ev.intentId, intentId, 'the outcome links back to the write-ahead intent');
   assert.strictEqual(ev.idempotencyKey, 'idem-123');
   assert.strictEqual(ev.fingerprint, 'f'.repeat(64));
   assert.strictEqual(ev.recipientSha256, 'a'.repeat(64), 'X-PD-Recipient-Hash is captured for verification correlation');
   assert.strictEqual(ev.keyEnv, 'live');
+  assert.strictEqual(ev.env, 'live', 'env is derived from the upstream key and stamped for correlation');
   assert.strictEqual(ev.requestBlobSha256, store.sha256Hex(reqBuf));
   assert.strictEqual(ev.requestBytes, reqBuf.length);
+  // The blob was stored at intent time (not by the capture), and still holds the
+  // exact request bytes the outcome references.
   assert.deepStrictEqual(store.readBlob(dir, ev.requestBlobSha256), reqBuf, 'blob holds the exact request bytes');
+  // The outcome resolves the intent: nothing left in the reconciliation worklist.
+  assert.deepStrictEqual(store.unresolvedIntents(dir), [], 'a recorded outcome resolves the intent');
   // Belt and suspenders: the serialized line must contain no key material.
   const serialized = fs.readFileSync(path.join(dir, 'audit.log'), 'utf8');
   assert.ok(!serialized.includes('secretkey'), 'the Lob key must never appear in the log');
@@ -241,4 +465,114 @@ test('captureProxyEvent records cancel (letter id from path) and verify (address
   assert.strictEqual(verify.addressSha256,
     store.addressHash({ line1: '185 Berry St', line2: 'Ste 6100', city: 'San Francisco', state: 'CA', zip: '94107' }),
     'verify event address hash correlates to the same normalized recipient');
+});
+
+test('captureProxyEvent derives env onto every captured event, defaulting to envUnknown', () => {
+  // env is what the proof-export correlation keys on, and it is DERIVED here (not
+  // seeded), so it must be asserted through captureProxyEvent. A test key yields
+  // 'test' on all three event types; an unclassifiable (non-Basic) upstream auth
+  // must fall back to 'envUnknown', never null, or the correlation's env guard
+  // silently degrades to "matches anything".
+  const testAuth = 'Basic ' + Buffer.from('test_k:').toString('base64');
+  const dirT = tmpDir();
+  store.captureProxyEvent(dirT, 'letter.create', '/v1/letters', {}, testAuth, Buffer.from('b'), 200, Buffer.from(JSON.stringify({ id: 'ltr_e1' })));
+  store.captureProxyEvent(dirT, 'letter.cancel', '/v1/letters/ltr_e1', {}, testAuth, Buffer.alloc(0), 200, Buffer.from(JSON.stringify({ id: 'ltr_e1', deleted: true })));
+  store.captureProxyEvent(dirT, 'address.verify', '/v1/us_verifications', {}, testAuth, Buffer.from(JSON.stringify({ primary_line: '1 A St', city: 'X', state: 'NY', zip_code: '10001' })), 200, Buffer.from(JSON.stringify({ deliverability: 'deliverable' })));
+  for (const l of store.auditReadLines(dirT)) {
+    assert.strictEqual(l.env, 'test', l.type + ' env derived from the test key');
+  }
+  // A non-Basic upstream auth cannot be classified -> keyEnv null -> env 'envUnknown'.
+  const dirU = tmpDir();
+  store.captureProxyEvent(dirU, 'letter.create', '/v1/letters', {}, 'Bearer opaque-token', Buffer.from('b'), 200, Buffer.from(JSON.stringify({ id: 'ltr_e2' })));
+  const ev = store.auditReadLines(dirU)[0];
+  assert.strictEqual(ev.keyEnv, null, 'a non-Basic auth is unclassifiable');
+  assert.strictEqual(ev.env, 'envUnknown', 'env falls back to the sentinel, never null');
+});
+
+test('writeSendIntent stores the request blob and records a send.intent that unresolvedIntents surfaces', () => {
+  const dir = tmpDir();
+  const reqBuf = Buffer.from('the exact bytes we are about to send to Lob');
+  const headers = { 'idempotency-key': 'idem-x', 'x-pd-fingerprint': 'f'.repeat(64), 'x-pd-recipient-hash': 'r'.repeat(64) };
+  const intentId = store.writeSendIntent(dir, { lobPath: '/v1/letters', reqHeaders: headers, reqBuf }, 1000);
+  assert.match(intentId, store.INTENT_ID_RE, 'a v4 UUID intent id is returned');
+  const intent = store.auditReadLines(dir).find((l) => l.type === 'send.intent');
+  assert.strictEqual(intent.intentId, intentId);
+  assert.strictEqual(intent.lobPath, '/v1/letters');
+  assert.strictEqual(intent.idempotencyKey, 'idem-x');
+  assert.strictEqual(intent.fingerprint, 'f'.repeat(64));
+  assert.strictEqual(intent.recipientHash, 'r'.repeat(64));
+  assert.strictEqual(intent.requestSha256, store.sha256Hex(reqBuf), 'the intent commits to the request bytes');
+  assert.strictEqual(intent.requestBlob, intent.requestSha256, 'requestBlob is the content-addressed key');
+  // The blob is stored at intent time (this is the ONLY place it is written now).
+  assert.deepStrictEqual(store.readBlob(dir, intent.requestBlob), reqBuf);
+  // With no outcome yet, the intent is unresolved: it is the reconciliation list.
+  const unresolved = store.unresolvedIntents(dir);
+  assert.strictEqual(unresolved.length, 1);
+  assert.strictEqual(unresolved[0].intentId, intentId);
+  assert.strictEqual(unresolved[0].requestSha256, intent.requestSha256);
+});
+
+test('unresolvedIntents: an outcome OR a manual resolution clears an intent', () => {
+  const dir = tmpDir();
+  // Three intents. One resolved by a recorded outcome, one by a manual
+  // resolution, one left dangling.
+  const byOutcome = store.writeSendIntent(dir, { lobPath: '/v1/letters', reqHeaders: {}, reqBuf: Buffer.from('outcome-body') }, 1000);
+  const byResolution = store.writeSendIntent(dir, { lobPath: '/v1/letters', reqHeaders: {}, reqBuf: Buffer.from('resolution-body') }, 2000);
+  const dangling = store.writeSendIntent(dir, { lobPath: '/v1/letters', reqHeaders: {}, reqBuf: Buffer.from('dangling-body') }, 3000);
+  // A recorded letter.create carrying the intentId resolves the first.
+  store.auditAppend(dir, { type: 'letter.create', status: 200, letterId: 'ltr_x', intentId: byOutcome }, 4000);
+  // A manual resolution resolves the second.
+  store.appendIntentResolution(dir, byResolution, { resolution: 'not_sent', note: 'checked Lob, nothing there' }, 5000);
+  const ids = store.unresolvedIntents(dir).map((i) => i.intentId);
+  assert.deepStrictEqual(ids, [dangling], 'only the intent with neither an outcome nor a resolution remains');
+});
+
+test('ledgerRows derives newest-first action rows and excludes noise', () => {
+  const lines = [
+    { ts: 't1', type: 'send.intent', intentId: 'i1' },                          // excluded (represented by outcome/banner)
+    { ts: 't2', type: 'letter.create', letterId: 'ltr_a', status: 200, keyEnv: 'live', intentId: 'i1' },
+    { ts: 't3', type: 'address.verify', addressSha256: 'x' },                    // excluded (correlated per-letter, not an action)
+    { ts: 't4', type: 'proof.export', letterId: 'ltr_a', complete: false },
+    { ts: 't5', type: 'letter.cancel', letterId: 'ltr_a', status: 200, keyEnv: 'live' },
+    { ts: 't6', type: 'send.intent.resolved', intentId: 'i9', resolution: 'not_sent', letterId: null },
+  ];
+  const rows = store.ledgerRows(lines);
+  assert.deepStrictEqual(rows.map((r) => r.type),
+    ['send.intent.resolved', 'letter.cancel', 'proof.export', 'letter.create'],
+    'newest first, only the four action types');
+  const create = rows.find((r) => r.type === 'letter.create');
+  assert.strictEqual(create.letterId, 'ltr_a');
+  assert.strictEqual(create.status, 200);
+  assert.strictEqual(create.keyEnv, 'live');
+  const exp = rows.find((r) => r.type === 'proof.export');
+  assert.strictEqual(exp.complete, false, 'export completeness is surfaced');
+  const res = rows.find((r) => r.type === 'send.intent.resolved');
+  assert.strictEqual(res.resolution, 'not_sent');
+  assert.deepStrictEqual(store.ledgerRows([]), [], 'no lines, no rows');
+});
+
+test('appendIntentResolution validates input and refuses unknown intents', () => {
+  const dir = tmpDir();
+  const intentId = store.writeSendIntent(dir, { lobPath: '/v1/letters', reqHeaders: {}, reqBuf: Buffer.from('body') }, 1000);
+  // Bad resolution value.
+  let r = store.appendIntentResolution(dir, intentId, { resolution: 'bogus' }, 2000);
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.status, 400);
+  // Bad letterId format.
+  r = store.appendIntentResolution(dir, intentId, { resolution: 'accepted', letterId: 'not-a-letter' }, 2000);
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.status, 400);
+  // Unknown intent id (well-formed but never written).
+  r = store.appendIntentResolution(dir, '00000000-0000-4000-8000-000000000000', { resolution: 'unknown' }, 2000);
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.status, 404);
+  // Valid: appends a send.intent.resolved line and clears the worklist.
+  r = store.appendIntentResolution(dir, intentId, { resolution: 'accepted', letterId: 'ltr_real1', note: 'found it at Lob' }, 3000);
+  assert.strictEqual(r.ok, true);
+  const resolved = store.auditReadLines(dir).find((l) => l.type === 'send.intent.resolved');
+  assert.strictEqual(resolved.intentId, intentId);
+  assert.strictEqual(resolved.resolution, 'accepted');
+  assert.strictEqual(resolved.letterId, 'ltr_real1');
+  assert.strictEqual(resolved.note, 'found it at Lob');
+  assert.deepStrictEqual(store.unresolvedIntents(dir), [], 'the resolution clears the intent');
 });

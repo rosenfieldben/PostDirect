@@ -1183,10 +1183,157 @@ import { confirmDuplicateSends } from './duplicate.mjs';
   }
 
   async function refreshAll() {
+    // The local record is server-side and needs no key, so refresh it always.
+    loadLedger();
     if (!hasKey()) { alert('Enter your Lob API key at the top of the page to load your mail history.'); return; }
     // Reloading the account list IS the tracking refresh: each letter returns its
     // current tracking_number and tracking_events.
     await loadAccountHistory({ reset: true });
+  }
+
+  // ═══ Local record (durable server-side ledger) ═══
+  // A view of the server's own audit log, distinct from the Lob-account list
+  // above: it is what THIS app durably recorded, and it needs no Lob key. GET
+  // /api/ledger returns { rows, unresolvedIntents }; every value is escaped
+  // through esc() before it reaches the DOM.
+  let localRows = [];
+  let localUnresolved = [];
+  let ledgerError = null;
+  let ledgerLoading = false;
+
+  const LEDGER_LABELS = {
+    'letter.create': 'Sent', 'letter.cancel': 'Cancelled',
+    'proof.export': 'Proof exported', 'send.intent.resolved': 'Reconciled',
+  };
+  const RESOLUTION_LABELS = { accepted: 'Accepted by Lob', not_sent: 'Not sent', unknown: 'Unknown' };
+
+  // A human, local time for a ledger timestamp; falls back to the raw (escaped)
+  // string if it does not parse, so a malformed ts is shown, never swallowed.
+  function fmtLedgerWhen(ts) {
+    const d = ts ? new Date(ts) : null;
+    if (!d || isNaN(d.getTime())) return esc(ts || '');
+    return esc(d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }));
+  }
+
+  async function loadLedger() {
+    ledgerLoading = true; ledgerError = null;
+    renderLedger();
+    try {
+      const resp = await fetch('/api/ledger', { headers: { Accept: 'application/json' } });
+      if (!resp.ok) throw new Error('Could not load the local record (HTTP ' + resp.status + ')');
+      const data = await resp.json();
+      localRows = Array.isArray(data.rows) ? data.rows : [];
+      localUnresolved = Array.isArray(data.unresolvedIntents) ? data.unresolvedIntents : [];
+    } catch (e) {
+      ledgerError = e.message || 'Could not load the local record';
+    } finally {
+      ledgerLoading = false;
+      renderLedger();
+    }
+  }
+
+  function renderLedger() {
+    renderIntentBanner();
+    const list = $('ledger-list');
+    const meta = $('ledger-meta');
+    if (!list) return;
+    if (ledgerLoading && localRows.length === 0) { list.innerHTML = ''; if (meta) meta.textContent = 'Loading…'; return; }
+    if (ledgerError) { list.innerHTML = '<p class="ledger-note">' + esc(ledgerError) + '</p>'; if (meta) meta.textContent = ''; return; }
+    if (localRows.length === 0) {
+      list.innerHTML = '<p class="ledger-note">No local record yet. Sends made through this app appear here.</p>';
+      if (meta) meta.textContent = '';
+      return;
+    }
+    const rows = localRows.map(r => {
+      const label = LEDGER_LABELS[r.type] || r.type;
+      let detail = '';
+      if (r.type === 'letter.create' || r.type === 'letter.cancel') {
+        const ok = typeof r.status === 'number' && r.status >= 200 && r.status < 300;
+        detail = '<span class="tag ' + (ok ? 'tag-neutral' : 'tag-accent-2') + '">' + esc(r.status == null ? 'n/a' : ('HTTP ' + r.status)) + '</span>' +
+          (r.keyEnv ? ' <span class="ledger-env">' + esc(r.keyEnv) + '</span>' : '');
+      } else if (r.type === 'proof.export') {
+        detail = '<span class="tag ' + (r.complete ? 'tag-neutral' : 'tag-accent-2') + '">' + (r.complete ? 'Complete' : 'Partial') + '</span>';
+      } else if (r.type === 'send.intent.resolved') {
+        detail = esc(RESOLUTION_LABELS[r.resolution] || r.resolution || '');
+      }
+      return '<tr>' +
+        '<td class="ledger-cell">' + fmtLedgerWhen(r.ts) + '</td>' +
+        '<td class="ledger-cell">' + esc(label) + '</td>' +
+        '<td class="ledger-id">' + esc(r.letterId || 'n/a') + '</td>' +
+        '<td class="ledger-cell">' + detail + '</td>' +
+      '</tr>';
+    }).join('');
+    list.innerHTML =
+      '<div class="table-scroll"><table class="table">' +
+        '<thead><tr><th>When</th><th>Event</th><th>Letter №</th><th>Detail</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table></div>';
+    if (meta) meta.textContent = localRows.length + ' record' + (localRows.length === 1 ? '' : 's');
+  }
+
+  function renderIntentBanner() {
+    const banner = $('intent-banner');
+    if (!banner) return;
+    if (!localUnresolved.length) { banner.classList.add('is-hidden'); banner.innerHTML = ''; return; }
+    const n = localUnresolved.length;
+    const items = localUnresolved.map(it => {
+      const idem = it.idempotencyKey ? ' · idempotency ' + esc(it.idempotencyKey) : '';
+      const meta = fmtLedgerWhen(it.ts) + ' · ' + esc(it.lobPath || '') + idem;
+      // data-intent carries the id (escaped for the attribute); the handler reads
+      // it back and re-encodes it into the request path.
+      return '<li class="intent-item">' +
+        '<div class="intent-meta">' + meta + '</div>' +
+        '<form class="intent-resolve" data-intent="' + esc(it.intentId) + '">' +
+          '<label class="intent-field"><span class="intent-field-label">Outcome</span>' +
+            '<select class="intent-resolution">' +
+              '<option value="accepted">Accepted by Lob</option>' +
+              '<option value="not_sent">Not sent</option>' +
+              '<option value="unknown">Unknown</option>' +
+            '</select></label>' +
+          '<input type="text" class="intent-letterid" placeholder="Letter ID (if accepted)" aria-label="Letter ID if accepted" autocomplete="off" />' +
+          '<input type="text" class="intent-note" placeholder="Note (optional)" aria-label="Reconciliation note" autocomplete="off" />' +
+          '<button class="btn btn-ghost" type="submit">Record outcome</button>' +
+        '</form>' +
+      '</li>';
+    }).join('');
+    banner.classList.remove('is-hidden');
+    banner.innerHTML =
+      '<div class="intent-banner-head">' + esc(String(n)) + ' unconfirmed send' + (n === 1 ? '' : 's') + ' need reconciliation</div>' +
+      '<p class="intent-banner-desc">A send was durably recorded before it was submitted, but no outcome came back (a crash, a timeout, or a lost response). Check Lob for each, then record what actually happened. Nothing is re-sent.</p>' +
+      '<ul class="intent-list">' + items + '</ul>';
+    banner.querySelectorAll('form.intent-resolve').forEach(form => {
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const id = form.getAttribute('data-intent');
+        const resolution = form.querySelector('.intent-resolution').value;
+        const letterId = form.querySelector('.intent-letterid').value.trim();
+        const note = form.querySelector('.intent-note').value.trim();
+        const payload = { resolution };
+        if (letterId) payload.letterId = letterId;
+        if (note) payload.note = note;
+        resolveIntent(id, payload, form);
+      });
+    });
+  }
+
+  async function resolveIntent(id, payload, form) {
+    const btn = form.querySelector('button[type="submit"]');
+    const prev = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Recording…'; }
+    try {
+      const resp = await fetch('/api/intents/' + encodeURIComponent(id) + '/resolve', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      });
+      if (!resp.ok) {
+        let msg = 'Could not record the outcome (HTTP ' + resp.status + ')';
+        try { const err = await resp.json(); if (err && err.error && err.error.message) msg = err.error.message; } catch (_) { /* keep default */ }
+        throw new Error(msg);
+      }
+      await loadLedger(); // the reconciled intent drops off the banner, a resolved row appears
+    } catch (e) {
+      if (btn) { btn.disabled = false; btn.textContent = prev; }
+      alert(e.message || 'Could not record the outcome');
+    }
   }
 
   // ═══ View switching ═══
@@ -1203,6 +1350,7 @@ import { confirmDuplicateSends } from './duplicate.mjs';
     $('view-compose-tab').tabIndex = composeActive ? 0 : -1;
     $('view-history-tab').tabIndex = composeActive ? -1 : 0;
     if (name === 'history') {
+      loadLedger(); // the local record is independent of the Lob key; load it every time
       if (hasKey() && historyLoadedKey !== keyIdentity()) loadAccountHistory({ reset: true });
       else renderHistory();
     }

@@ -210,13 +210,23 @@
             <button class="btn btn-secondary" id="btn-refresh-all" type="button">Refresh</button>
           </div>
         </div>
-        <p class="history-desc">Every letter on this account — live USPS tracking, and a court-ready proof package for each one.</p>
+        <p class="history-desc">Every letter on this account, with live USPS tracking and a tamper-evident proof package for each one.</p>
         <div class="history-empty is-hidden" id="history-empty">
           <p class="history-empty-title">Nothing has gone to press yet.</p>
           <p class="history-empty-desc">Letters you send will appear here with live USPS tracking and an exportable proof package.</p>
           <button class="btn btn-primary" id="btn-compose-first" type="button">Compose the first letter →</button>
         </div>
         <div id="history-list"></div>
+
+        <section class="local-record" id="local-record" aria-labelledby="local-record-title">
+          <div class="local-record-head">
+            <h2 class="local-record-title" id="local-record-title">Local record</h2>
+            <span class="history-meta" id="ledger-meta"></span>
+          </div>
+          <p class="history-desc">This server's own durable record of every send, kept independently of Lob. It outlives Lob's retention window, and it flags any send whose outcome was never confirmed.</p>
+          <div class="intent-banner is-hidden" id="intent-banner" role="alert" aria-live="polite"></div>
+          <div id="ledger-list"></div>
+        </section>
       </div>
     </div>
   </main>

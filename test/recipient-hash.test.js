@@ -77,15 +77,19 @@ test('buildProofPackage correlates a verification via the typed-address hash eve
   const responseToHash = store.addressHash({ line1: '185 BERRY ST', line2: '', city: 'SAN FRANCISCO', state: 'CA', zip: '94107' });
   assert.notStrictEqual(typedHash, responseToHash, 'the reformatted response address hashes differently');
 
+  // These records predate the env field (no `env`), so the correlation treats
+  // both sides as envUnknown and does not reject on environment. The timestamps
+  // put the verification within the 24h before the send, as the app records them.
+  const createTs = Date.parse('2026-07-18T00:00:00Z');
   store.blobStore(dir, Buffer.from('multipart bytes'));
   store.auditAppend(dir, {
     type: 'letter.create', status: 200, letterId: 'ltr_rh1',
     requestBlobSha256: store.sha256Hex(Buffer.from('multipart bytes')), requestBytes: 15,
     recipientSha256: typedHash, keyEnv: 'live',
     response: { id: 'ltr_rh1', to: { address_line1: '185 BERRY ST', address_line2: '', address_city: 'SAN FRANCISCO', address_state: 'CA', address_zip: '94107' } },
-  });
+  }, createTs);
   // The verification was on the typed address, so its stored hash is typedHash.
-  store.auditAppend(dir, { type: 'address.verify', status: 200, addressSha256: typedHash, keyEnv: 'live', response: { deliverability: 'deliverable' } });
+  store.auditAppend(dir, { type: 'address.verify', status: 200, addressSha256: typedHash, keyEnv: 'live', response: { deliverability: 'deliverable' } }, createTs - 60 * 60 * 1000);
 
   const pkg = await store.buildProofPackage(dir, 'ltr_rh1', {
     now: () => Date.parse('2026-07-18T00:00:00Z'),
@@ -103,11 +107,12 @@ test('correlation still falls back to the response `to` hash when no recipientSh
   // the verified address, so the fallback path still correlates.
   const addr = { line1: '1 MAIN ST', line2: '', city: 'ANYTOWN', state: 'NY', zip: '10001' };
   const h = store.addressHash(addr);
+  const createTs = Date.parse('2026-07-18T00:00:00Z');
   store.auditAppend(dir, {
     type: 'letter.create', status: 200, letterId: 'ltr_rh2', keyEnv: 'live',
     response: { id: 'ltr_rh2', to: { address_line1: '1 Main St', address_line2: '', address_city: 'Anytown', address_state: 'NY', address_zip: '10001' } },
-  });
-  store.auditAppend(dir, { type: 'address.verify', status: 200, addressSha256: h, keyEnv: 'live', response: { deliverability: 'deliverable' } });
+  }, createTs);
+  store.auditAppend(dir, { type: 'address.verify', status: 200, addressSha256: h, keyEnv: 'live', response: { deliverability: 'deliverable' } }, createTs - 60 * 60 * 1000);
   const pkg = await store.buildProofPackage(dir, 'ltr_rh2', {
     now: () => Date.parse('2026-07-18T00:00:00Z'),
     fetchLetter: async () => ({ ok: false, status: 404 }),

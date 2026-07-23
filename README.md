@@ -167,10 +167,55 @@ rejected):
   event with a UTC timestamp: `letter.create` (with the HTTP status, letter ID,
   idempotency key, fingerprint, and the derived `test`/`live` classification),
   `letter.cancel`, `address.verify`, and `proof.export`. Lines are never
-  rewritten or deleted by the app. Failed sends (non-2xx) are recorded too.
+  rewritten or deleted by the app. Failed sends (non-2xx) are recorded too. Each
+  line is written with an `fsync`, so a line the app reported as recorded is on
+  stable storage, not just in the OS cache, before the response is sent.
 - `blobs/` holds content-addressed raw bytes (`blobs/<sha256hex>`): the exact
   request bytes sent to Lob (including your uploaded document) and each rendered
-  PDF fetched during a proof export.
+  PDF fetched during a proof export. Blobs are `fsync`'d for the same reason.
+- `exports/` holds a durable copy of every proof package you generate, named
+  `<letterId>-<timestamp>.zip` (mode `0600`, `fsync`'d). The download is not the
+  only copy: the server keeps its own, so a lost or interrupted download can be
+  recovered from disk, and each export is a dated evidentiary snapshot.
+
+**Tamper-evidence: the audit log is hash-chained.** Every `audit.log` line
+carries a `seq` (its 1-based position in the file) and a `prev` (the SHA-256 of
+the previous line's raw bytes; the first line points at 64 zeros). Because each
+line commits to the exact bytes of the one before it, altering, inserting, or
+removing any line breaks the chain at the following line, and the break is
+detectable without any external record. The chain is verified on every proof
+export and the result travels in the package `manifest.json` under `chain`
+(`ok`, `checkedLines`, `legacyLines`, `firstBreakSeq`, and `head`). A break also
+logs loudly server-side. Lines written by an older build that predate the chain
+have no `seq`/`prev`; they are tolerated, counted as `legacyLines`, and the
+first chained line after them commits to their bytes, so the prefix is anchored
+too. `chain.head` (the hash of the log's last line) is an **anchorable external
+commitment**: record it somewhere outside the server (a note, a timestamped
+email, a countersignature) and any later rewrite of history becomes provable,
+because the recomputed head will no longer match what you anchored. Appends are
+serialized by an advisory lock file (`audit.log.lock`), so even if a second
+process is accidentally pointed at the same `PD_DATA_DIR` (a stray double start,
+a restore job), two writers cannot interleave and leave the chain looking
+tampered; a lock abandoned by a crashed writer is reclaimed automatically.
+
+**Write-ahead intents: a send is recorded before it happens.** Before the proxy
+contacts Lob for a mutating call (creating or cancelling a letter), it appends a
+`send.intent` line (a new random `intentId`, the request hash, the recipient and
+fingerprint hashes, the idempotency key) and stores the exact request bytes as a
+blob. This write is durable and it **fails closed**: if the intent cannot be
+written, the send is refused with a `503` and Lob is never contacted, because a
+send we cannot record is a send we will not make. When Lob answers, the outcome
+(`letter.create` / `letter.cancel`) is recorded carrying the same `intentId`. An
+intent with no recorded outcome (a crash, a timeout, or a lost response between
+the intent and Lob's reply) is a send whose fate is unknown: it stays on a
+reconciliation worklist until you check Lob and record what happened via
+`POST /api/intents/:intentId/resolve` (`accepted`, `not_sent`, or `unknown`),
+which appends a `send.intent.resolved` line. Reconciliation is always a manual
+operator judgment; the app never auto-resends anything. The **Local record**
+section of the History tab shows this durable ledger and, when there is anything
+to reconcile, a banner with an inline control to record each outcome. It reads
+the server's own log (`GET /api/ledger`), so it needs no Lob key and works even
+when the account list cannot be loaded.
 
 **It contains client PII and the documents you mailed.** Treat the directory as
 sensitive: restrict its permissions (it is `0700`), keep it off any web-served
@@ -191,6 +236,36 @@ PDF and tracking are fetched from Lob at export time, so export after you see
 delivery events and **always within Lob's 90-day window**; after that Lob can no
 longer supply the rendered PDF or tracking, and the manifest will record them as
 missing (the rest of the package is still built from the durable store).
+
+An address verification is attached to a letter as evidence only when it is a
+genuine match: the verified address hashes to the letter's recipient, the same
+key environment (`test`/`live`) was used for both (a legacy record with no
+recorded environment is tolerated, not rejected), and the verification happened
+within the 24 hours before the send. The manifest's `verifications` array states
+the basis for each attachment (which recipient hash matched, the environment
+agreement, and how long before the send), so the correlation is auditable rather
+than implicit; an unrelated verification of the same address is not attached.
+
+### What the proof package is, and is not
+
+**What it is.** A self-contained, tamper-evident record of what this app
+submitted to Lob for one letter and what Lob returned. It bundles the exact
+request bytes, Lob's creation response, the rendered PDF as printed, the tracking
+state at export time, the correlated address verifications with the basis for
+each, and every audit line for the letter, plus a `manifest.json` carrying a
+SHA-256 of every file and the audit-log chain result. Because the audit log is
+hash-chained and each package records the chain head, a later change to the
+underlying record is detectable.
+
+**What it is not.** "Tamper-evident" describes the hash chain, not a legal
+status: the package is not a court certification, a notarization, or an
+attestation of any kind. It does not prove delivery. USPS does not confirm final
+delivery for ordinary First-Class mail, so the package shows what was submitted
+and rendered for mailing, not that it arrived. It does not prove the physical
+piece was mailed; it proves what Lob was asked to mail and what Lob reported back.
+And tamper-evidence means a later change is detectable (if you anchored the chain
+head externally), not that the record is physically immutable or beyond the reach
+of someone with direct disk access.
 
 **Retention is your decision.** The app never auto-deletes anything. Removing
 records is a deliberate operator action on `PD_DATA_DIR`, outside the app.
