@@ -41,6 +41,12 @@ test('clientIp ignores X-Forwarded-For by default (no PD_TRUST_PROXY)', () => {
   assert.strictEqual(clientIp({ headers: {}, socket: {} }), 'unknown');
 });
 
+test('clientIp ignores CF-Connecting-IP unless Access enforcement is passed', () => {
+  const req = { headers: { 'cf-connecting-ip': '9.9.9.9' }, socket: { remoteAddress: '10.0.0.9' } };
+  assert.strictEqual(clientIp(req), '10.0.0.9', 'unenforced: the CF header is not trusted, socket wins');
+  assert.strictEqual(clientIp(req, true), '9.9.9.9', 'enforced: the CF header is the authoritative identity');
+});
+
 test('parseCookies preserves values containing "="', () => {
   const c = parseCookies('a=b=c; pd_session=1700000000000.deadbeef');
   assert.strictEqual(c.a, 'b=c');

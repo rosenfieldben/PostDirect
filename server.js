@@ -398,7 +398,7 @@ async function route(req, res) {
 
   // ── Login POST ──
   if (pathname === '/login' && req.method === 'POST') {
-    const ip = clientIp(req);
+    const ip = clientIp(req, accessEnforcer.enabled);
     const secure = isSecure(req);
     const tooMany = () => {
       res.writeHead(429, { 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': String(Math.ceil(LOGIN_WINDOW_MS / 1000)) });
